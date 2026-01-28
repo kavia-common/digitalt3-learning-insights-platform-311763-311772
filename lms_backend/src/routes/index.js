@@ -1,14 +1,15 @@
 const express = require('express');
 const healthController = require('../controllers/health');
+const authRoutes = require('./auth');
 
 const router = express.Router();
-// Health endpoint
 
 /**
  * @swagger
  * /:
  *   get:
  *     summary: Health endpoint
+ *     description: Returns basic service status, DB connectivity, and whether JWT auth is configured.
  *     responses:
  *       200:
  *         description: Service health check passed
@@ -29,7 +30,22 @@ const router = express.Router();
  *                 environment:
  *                   type: string
  *                   example: development
+ *                 db:
+ *                   type: object
+ *                   properties:
+ *                     connected:
+ *                       type: boolean
+ *                       example: true
+ *                 auth:
+ *                   type: object
+ *                   properties:
+ *                     jwtConfigured:
+ *                       type: boolean
+ *                       example: true
  */
 router.get('/', healthController.check.bind(healthController));
+
+// Auth endpoints
+router.use('/auth', authRoutes);
 
 module.exports = router;

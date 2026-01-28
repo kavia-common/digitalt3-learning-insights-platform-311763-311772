@@ -1,9 +1,13 @@
 const healthService = require('../services/health');
 
 class HealthController {
-  check(req, res) {
-    const healthStatus = healthService.getStatus();
-    return res.status(200).json(healthStatus);
+  async check(req, res, next) {
+    try {
+      const healthStatus = await healthService.getStatus();
+      return res.status(200).json(healthStatus);
+    } catch (err) {
+      return next(err);
+    }
   }
 }
 
