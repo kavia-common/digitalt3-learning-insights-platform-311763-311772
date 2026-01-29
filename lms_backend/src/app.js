@@ -30,7 +30,11 @@ app.use(cors({
 
 app.set('trust proxy', process.env.TRUST_PROXY === 'true' || true);
 
-app.use('/docs', swaggerUi.serve, (req, res, next) => {
+/**
+ * Serve the OpenAPI JSON. This uses the same dynamic "servers" URL logic as Swagger UI
+ * so the spec remains correct behind proxies and in different environments.
+ */
+app.get('/openapi.json', (req, res) => {
   const host = req.get('host'); // may or may not include port
   let protocol = req.protocol; // http or https
 
@@ -52,8 +56,23 @@ app.use('/docs', swaggerUi.serve, (req, res, next) => {
       },
     ],
   };
-  swaggerUi.setup(dynamicSpec)(req, res, next);
+
+  return res.status(200).json(dynamicSpec);
 });
+
+/**
+ * Interactive Swagger UI.
+ * Note: Swagger UI will pull the spec from /openapi.json.
+ */
+app.use(
+  '/api-docs',
+  swaggerUi.serve,
+  swaggerUi.setup(null, {
+    swaggerOptions: {
+      url: '/openapi.json',
+    },
+  })
+);
 
 // Parse JSON request body
 app.use(express.json());

@@ -6,10 +6,18 @@ const router = express.Router();
 
 /**
  * @swagger
+ * tags:
+ *   - name: Health
+ *     description: Service health and diagnostics
+ */
+
+/**
+ * @swagger
  * /:
  *   get:
  *     summary: Health endpoint
  *     description: Returns basic service status, DB connectivity, and whether JWT auth is configured.
+ *     tags: [Health]
  *     responses:
  *       200:
  *         description: Service health check passed
