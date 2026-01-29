@@ -30,8 +30,10 @@ const WRITE_ROLES = ['admin', 'instructor'];
  *       description: A user profile (public fields only)
  *       properties:
  *         id:
- *           type: string
- *           example: 65f0c2c6e6f5c2f0a1b2c3d4
+ *           type: integer
+ *           format: int32
+ *           description: Relational primary key (auto-increment integer)
+ *           example: 123
  *         email:
  *           type: string
  *           format: email
@@ -45,11 +47,13 @@ const WRITE_ROLES = ['admin', 'instructor'];
  *           example: learner
  *     Course:
  *       type: object
- *       description: Course model
+ *       description: Course model (relational)
  *       properties:
  *         id:
- *           type: string
- *           example: 6600c2c6e6f5c2f0a1b2c3d4
+ *           type: integer
+ *           format: int32
+ *           description: Relational primary key (auto-increment integer)
+ *           example: 42
  *         title:
  *           type: string
  *           example: Introduction to Cybersecurity
@@ -73,6 +77,25 @@ const WRITE_ROLES = ['admin', 'instructor'];
  *         updatedAt:
  *           type: string
  *           format: date-time
+ *     PaginatedCoursesResponse:
+ *       type: object
+ *       properties:
+ *         items:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/Course'
+ *         page:
+ *           type: integer
+ *           format: int32
+ *           example: 1
+ *         limit:
+ *           type: integer
+ *           format: int32
+ *           example: 20
+ *         total:
+ *           type: integer
+ *           format: int32
+ *           example: 100
  *     CourseCreateRequest:
  *       type: object
  *       required: [title]
@@ -287,6 +310,10 @@ function validateUpdatePayload(body) {
  *     responses:
  *       200:
  *         description: Paginated courses list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/PaginatedCoursesResponse'
  *       401:
  *         description: Missing or invalid token
  */
@@ -351,11 +378,23 @@ router.get('/', auth, async (req, res, next) => {
  *       - bearerAuth: []
  *     requestBody:
  *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CourseCreateRequest'
  *     responses:
  *       201:
  *         description: Course created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Course'
  *       400:
  *         description: Validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       401:
  *         description: Missing or invalid token
  *       403:
@@ -410,16 +449,109 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
  *     tags: [Courses]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: courseId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational course id
+ *     responses:
+ *       200:
+ *         description: Course
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Course'
+ *       400:
+ *         description: Invalid courseId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       404:
+ *         description: Course not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *   patch:
  *     summary: Update a course
  *     tags: [Courses]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: courseId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational course id
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CourseUpdateRequest'
+ *     responses:
+ *       200:
+ *         description: Updated course
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Course'
+ *       400:
+ *         description: Validation error or invalid courseId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
+ *       404:
+ *         description: Course not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *   delete:
  *     summary: Delete a course
  *     tags: [Courses]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: courseId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational course id
+ *     responses:
+ *       204:
+ *         description: Deleted
+ *       400:
+ *         description: Invalid courseId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
+ *       404:
+ *         description: Course not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get('/:courseId', auth, async (req, res, next) => {
   try {

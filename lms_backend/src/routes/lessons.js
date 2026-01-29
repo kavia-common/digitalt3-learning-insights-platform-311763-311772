@@ -21,14 +21,18 @@ const WRITE_ROLES = ['admin', 'instructor'];
  *   schemas:
  *     Lesson:
  *       type: object
- *       description: Lesson model
+ *       description: Lesson model (relational)
  *       properties:
  *         id:
- *           type: string
- *           example: 7700c2c6e6f5c2f0a1b2c3d4
+ *           type: integer
+ *           format: int32
+ *           description: Relational primary key (auto-increment integer)
+ *           example: 101
  *         courseId:
- *           type: string
- *           example: 6600c2c6e6f5c2f0a1b2c3d4
+ *           type: integer
+ *           format: int32
+ *           description: Foreign key to Course.id
+ *           example: 42
  *         title:
  *           type: string
  *           example: Threat Modeling Basics
@@ -53,8 +57,10 @@ const WRITE_ROLES = ['admin', 'instructor'];
  *       required: [courseId, title]
  *       properties:
  *         courseId:
- *           type: string
- *           example: 6600c2c6e6f5c2f0a1b2c3d4
+ *           type: integer
+ *           format: int32
+ *           description: Foreign key to Course.id
+ *           example: 42
  *         title:
  *           type: string
  *           example: Threat Modeling Basics
@@ -84,6 +90,36 @@ const WRITE_ROLES = ['admin', 'instructor'];
  *           type: string
  *           enum: [draft, published, archived]
  *           example: published
+ *     PaginatedLessonsResponse:
+ *       type: object
+ *       properties:
+ *         items:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/Lesson'
+ *         page:
+ *           type: integer
+ *           format: int32
+ *           example: 1
+ *         limit:
+ *           type: integer
+ *           format: int32
+ *           example: 20
+ *         total:
+ *           type: integer
+ *           format: int32
+ *           example: 100
+ *     LessonsByCourseResponse:
+ *       type: object
+ *       properties:
+ *         items:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/Lesson'
+ *         total:
+ *           type: integer
+ *           format: int32
+ *           example: 3
  */
 
 function isValidId(raw) {
@@ -201,6 +237,43 @@ function validateUpdatePayload(body) {
  *     tags: [Lessons]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number (1-based)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *         description: Page size
+ *       - in: query
+ *         name: courseId
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Optional filter by Course.id (foreign key)
+ *     responses:
+ *       200:
+ *         description: Paginated lessons list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/PaginatedLessonsResponse'
+ *       400:
+ *         description: Invalid query parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
  */
 router.get('/', auth, async (req, res, next) => {
   try {
@@ -253,6 +326,29 @@ router.get('/', auth, async (req, res, next) => {
  *     tags: [Lessons]
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/LessonCreateRequest'
+ *     responses:
+ *       201:
+ *         description: Lesson created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Lesson'
+ *       400:
+ *         description: Validation error (including invalid courseId)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
  */
 router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
   try {
@@ -308,6 +404,29 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
  *     tags: [Lessons]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: courseId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational course id
+ *     responses:
+ *       200:
+ *         description: Lessons for the course
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/LessonsByCourseResponse'
+ *       400:
+ *         description: Invalid courseId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
  */
 router.get('/by-course/:courseId', auth, async (req, res, next) => {
   try {
@@ -333,6 +452,118 @@ router.get('/by-course/:courseId', auth, async (req, res, next) => {
   }
 });
 
+/**
+ * @swagger
+ * /lessons/{lessonId}:
+ *   get:
+ *     summary: Get a lesson by id
+ *     tags: [Lessons]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational lesson id
+ *     responses:
+ *       200:
+ *         description: Lesson
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Lesson'
+ *       400:
+ *         description: Invalid lessonId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       404:
+ *         description: Lesson not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *   patch:
+ *     summary: Update a lesson
+ *     tags: [Lessons]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational lesson id
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/LessonUpdateRequest'
+ *     responses:
+ *       200:
+ *         description: Updated lesson
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Lesson'
+ *       400:
+ *         description: Validation error or invalid lessonId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
+ *       404:
+ *         description: Lesson not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *   delete:
+ *     summary: Delete a lesson
+ *     tags: [Lessons]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational lesson id
+ *     responses:
+ *       204:
+ *         description: Deleted
+ *       400:
+ *         description: Invalid lessonId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
+ *       404:
+ *         description: Lesson not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
 router.get('/:lessonId', auth, async (req, res, next) => {
   try {
     const ds = getDataSource();

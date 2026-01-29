@@ -55,10 +55,13 @@ const router = express.Router();
  *           example: StrongPassword123!
  *     AuthUser:
  *       type: object
+ *       description: Authenticated user profile (public fields only)
  *       properties:
  *         id:
- *           type: string
- *           example: 65f0c2c6e6f5c2f0a1b2c3d4
+ *           type: integer
+ *           format: int32
+ *           description: Relational primary key (auto-increment integer)
+ *           example: 123
  *         email:
  *           type: string
  *           format: email
