@@ -23,10 +23,18 @@ async function start() {
   } catch (err) {
     // Do not hard-fail startup: backend preview should boot even if DB isn't reachable yet.
     // This supports AWS RDS being temporarily unavailable during preview.
-    console.warn(
-      `MySQL connection failed at startup (target: ${dbHost || '(unknown)'}:${dbPort}/${dbName}). ` +
-        `Continuing to start server without DB. Error: ${err.message}`
-    );
+    const code = err && err.code ? String(err.code) : null;
+
+    if (code === 'MYSQL_ENV_MISSING') {
+      console.warn(
+        `MySQL not configured (missing env vars). Continuing to start server without DB. Error: ${err.message}`
+      );
+    } else {
+      console.warn(
+        `MySQL connection failed at startup (target: ${dbHost || '(unknown)'}:${dbPort}/${dbName}). ` +
+          `Continuing to start server without DB. Error: ${err.message}`
+      );
+    }
   }
 
   const server = app.listen(PORT, HOST, () => {

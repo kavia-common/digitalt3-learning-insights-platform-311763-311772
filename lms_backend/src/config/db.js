@@ -70,6 +70,12 @@ function buildMySqlDataSourceOptionsFromEnv() {
 
 let appDataSource = null;
 
+/**
+ * When multiple requests (or startup + request) race to initialize the DataSource,
+ * we want to ensure only a single initialize() happens.
+ */
+let initializationPromise = null;
+
 // PUBLIC_INTERFACE
 function getDataSource() {
   /** Returns the singleton TypeORM DataSource instance, if created. */
@@ -86,17 +92,33 @@ async function initializeDataSource() {
     return appDataSource;
   }
 
-  const options = buildMySqlDataSourceOptionsFromEnv();
-  const target = { host: options.host, port: options.port, database: options.database };
+  // Single-flight: if init is already in progress, await it.
+  if (initializationPromise) {
+    return initializationPromise;
+  }
 
-  // Safe log: no secrets.
-  console.log(`MySQL configuring connection target: ${describeTarget(target)}`);
+  initializationPromise = (async () => {
+    const options = buildMySqlDataSourceOptionsFromEnv();
+    const target = { host: options.host, port: options.port, database: options.database };
 
-  appDataSource = new DataSource(options);
-  await appDataSource.initialize();
+    // Safe log: no secrets.
+    console.log(`MySQL configuring connection target: ${describeTarget(target)}`);
 
-  console.log(`MySQL connected: ${describeTarget(target)}`);
-  return appDataSource;
+    appDataSource = new DataSource(options);
+    await appDataSource.initialize();
+
+    console.log(`MySQL connected: ${describeTarget(target)}`);
+    return appDataSource;
+  })();
+
+  try {
+    return await initializationPromise;
+  } finally {
+    // If initialization failed, allow retry later (e.g., DB comes up after preview starts).
+    if (!appDataSource || !appDataSource.isInitialized) {
+      initializationPromise = null;
+    }
+  }
 }
 
 // PUBLIC_INTERFACE
