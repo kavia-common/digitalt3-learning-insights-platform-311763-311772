@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 require('dotenv').config();
 
 const { createDataSourceFromEnv } = require('../config/db');
@@ -23,7 +22,6 @@ async function runMigrations() {
 
 async function runSeeds() {
   // Use the existing seed entrypoint to preserve behavior.
-  // eslint-disable-next-line global-require
   const { runSeeds: seed } = require('../seeds/seed');
   await seed();
 }

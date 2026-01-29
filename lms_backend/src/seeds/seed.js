@@ -214,7 +214,7 @@ async function runSeeds() {
     console.log('Seed completed.');
     console.log(`Users: admin=${admin.email}, instructor=${instructor.email}, learner=${learner.email}`);
     console.log(`Courses: ${course1.title} (id=${course1.id}), ${course2.title} (id=${course2.id})`);
-    console.log(`Note: passwords can be overridden via SEED_* env vars.`);
+    console.log('Note: passwords can be overridden via SEED_* env vars.');
   } finally {
     await ds.destroy();
   }

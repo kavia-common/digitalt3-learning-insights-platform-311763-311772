@@ -29,7 +29,7 @@ const CourseEntity = new EntitySchema({
     tags: {
       type: 'json',
       nullable: false,
-      default: () => "'[]'",
+      default: () => '\'[]\'',
     },
     publishedAt: {
       type: 'datetime',
