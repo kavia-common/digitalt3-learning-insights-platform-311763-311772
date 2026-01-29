@@ -18,11 +18,11 @@ const router = express.Router();
  * /:
  *   get:
  *     summary: Health endpoint
- *     description: Returns basic service status, DB connectivity, and whether JWT auth is configured.
+ *     description: Returns basic service status, MySQL connectivity (TypeORM), and whether JWT auth is configured.
  *     tags: [Health]
  *     responses:
  *       200:
- *         description: Service health check passed
+ *         description: Service health status (may be degraded if DB is unavailable)
  *         content:
  *           application/json:
  *             schema:
@@ -30,6 +30,8 @@ const router = express.Router();
  *               properties:
  *                 status:
  *                   type: string
+ *                   description: Overall service health
+ *                   enum: [ok, degraded, error]
  *                   example: ok
  *                 message:
  *                   type: string
@@ -46,6 +48,17 @@ const router = express.Router();
  *                     connected:
  *                       type: boolean
  *                       example: true
+ *                     type:
+ *                       type: string
+ *                       example: mysql
+ *                     dbName:
+ *                       type: string
+ *                       description: Database name from DEFAULT_DB (if configured)
+ *                       example: lms
+ *                     error:
+ *                       type: string
+ *                       description: Present when the DB ping fails (no secrets)
+ *                       example: connect ECONNREFUSED 127.0.0.1:3306
  *                 auth:
  *                   type: object
  *                   properties:
