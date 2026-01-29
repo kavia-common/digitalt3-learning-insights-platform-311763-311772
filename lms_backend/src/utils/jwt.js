@@ -8,7 +8,14 @@ const DEFAULT_EXPIRES_IN = '1d';
  */
 function getJwtConfig() {
   const secret = process.env.JWT_SECRET;
-  const expiresIn = process.env.JWT_EXPIRES_IN || DEFAULT_EXPIRES_IN;
+
+  // Support both env var spellings for backward compatibility.
+  // Preferred: JWT_EXPIRES_IN
+  // Legacy: JWT_EXPIRESIN
+  const expiresIn =
+    process.env.JWT_EXPIRES_IN ||
+    process.env.JWT_EXPIRESIN ||
+    DEFAULT_EXPIRES_IN;
 
   if (!secret) {
     const err = new Error('JWT_SECRET is not configured');

@@ -9,7 +9,10 @@ const HOST = process.env.HOST || '0.0.0.0';
 async function start() {
   try {
     await connectToDatabase();
-    console.log('Connected to MongoDB');
+
+    // Do not log credentials. Only log a safe/high-level indicator of configured DB.
+    const dbName = process.env.MONGODB_DB || '(default)';
+    console.log(`MongoDB connected (db: ${dbName})`);
 
     const server = app.listen(PORT, HOST, () => {
       console.log(`Server running at http://${HOST}:${PORT}`);
@@ -26,7 +29,8 @@ async function start() {
 
     return server;
   } catch (err) {
-    console.error('Failed to start server:', err.message);
+    // Avoid dumping full connection URI or stack traces that might include secrets.
+    console.error(`Failed to start server: ${err.message}`);
     process.exit(1);
   }
 }
