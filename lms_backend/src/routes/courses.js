@@ -1,9 +1,8 @@
 const express = require('express');
-const mongoose = require('mongoose');
 
 const auth = require('../middleware/auth');
 const rbac = require('../middleware/rbac');
-const Course = require('../models/Course');
+const { getDataSource } = require('../config/db');
 
 const router = express.Router();
 
@@ -113,8 +112,9 @@ const WRITE_ROLES = ['admin', 'instructor'];
  *           example: [security, fundamentals, compliance]
  */
 
-function isValidObjectId(id) {
-  return mongoose.Types.ObjectId.isValid(id);
+function isValidId(raw) {
+  const n = Number.parseInt(String(raw || ''), 10);
+  return Number.isFinite(n) && n > 0;
 }
 
 function normalizeTags(tags) {
@@ -142,49 +142,31 @@ function normalizeTags(tags) {
   return deduped;
 }
 
-function toCourseResponse(doc) {
-  // doc may be mongoose document or a lean object
-  const id = doc._id ? String(doc._id) : String(doc.id);
-
+/**
+ * Convert DB entity to API response shape.
+ * Works with objects returned by repository/query builder.
+ */
+function toCourseResponse(course) {
   const createdBy =
-    doc.createdBy && typeof doc.createdBy === 'object'
+    course.createdBy && typeof course.createdBy === 'object'
       ? {
-          id: doc.createdBy._id ? String(doc.createdBy._id) : String(doc.createdBy.id),
-          email: doc.createdBy.email,
-          name: doc.createdBy.name,
-          role: doc.createdBy.role,
+          id: String(course.createdBy.id),
+          email: course.createdBy.email,
+          name: course.createdBy.name,
+          role: course.createdBy.role,
         }
       : undefined;
 
   return {
-    id,
-    title: doc.title,
-    description: doc.description,
-    status: doc.status,
-    tags: doc.tags || [],
+    id: String(course.id),
+    title: course.title,
+    description: course.description,
+    status: course.status,
+    tags: Array.isArray(course.tags) ? course.tags : [],
     createdBy: createdBy || undefined,
-    createdAt: doc.createdAt,
-    updatedAt: doc.updatedAt,
+    createdAt: course.createdAt,
+    updatedAt: course.updatedAt,
   };
-}
-
-function buildCourseSearchFilter({ search, status }) {
-  const filter = { deletedAt: null };
-
-  if (status) {
-    filter.status = status;
-  }
-
-  if (search && typeof search === 'string' && search.trim().length > 0) {
-    const q = search.trim();
-    // Simple regex search to avoid requiring text indexes.
-    filter.$or = [
-      { title: { $regex: q, $options: 'i' } },
-      { description: { $regex: q, $options: 'i' } },
-    ];
-  }
-
-  return filter;
 }
 
 function validateCreatePayload(body) {
@@ -305,51 +287,21 @@ function validateUpdatePayload(body) {
  *     responses:
  *       200:
  *         description: Paginated courses list
- *         content:
- *           application/json:
- *             examples:
- *               example:
- *                 value:
- *                   items:
- *                     - id: 6600c2c6e6f5c2f0a1b2c3d4
- *                       title: Introduction to Cybersecurity
- *                       description: Learn core security concepts, threats, and best practices.
- *                       status: draft
- *                       tags: [security, fundamentals]
- *                       createdAt: '2025-01-01T00:00:00.000Z'
- *                       updatedAt: '2025-01-02T00:00:00.000Z'
- *                   page: 1
- *                   limit: 20
- *                   total: 1
- *             schema:
- *               type: object
- *               properties:
- *                 items:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/Course'
- *                 page:
- *                   type: integer
- *                 limit:
- *                   type: integer
- *                 total:
- *                   type: integer
  *       401:
  *         description: Missing or invalid token
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get('/', auth, async (req, res, next) => {
   try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
     const pageRaw = Number(req.query.page || 1);
     const limitRaw = Number(req.query.limit || 20);
 
     const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
-    const limit = Number.isFinite(limitRaw)
-      ? Math.min(100, Math.max(1, Math.floor(limitRaw)))
-      : 20;
+    const limit = Number.isFinite(limitRaw) ? Math.min(100, Math.max(1, Math.floor(limitRaw))) : 20;
 
     const search = req.query.search;
     const status = req.query.status;
@@ -358,17 +310,24 @@ router.get('/', auth, async (req, res, next) => {
       return res.status(400).json({ message: 'Invalid status filter' });
     }
 
-    const filter = buildCourseSearchFilter({ search, status });
+    const qb = ds
+      .getRepository('Course')
+      .createQueryBuilder('course')
+      .leftJoinAndSelect('course.createdBy', 'createdBy')
+      .where('course.deletedAt IS NULL');
 
-    const [items, total] = await Promise.all([
-      Course.find(filter)
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit)
-        .populate('createdBy', 'email name role')
-        .lean(),
-      Course.countDocuments(filter),
-    ]);
+    if (status) {
+      qb.andWhere('course.status = :status', { status });
+    }
+
+    if (search && typeof search === 'string' && search.trim().length > 0) {
+      const q = `%${search.trim()}%`;
+      qb.andWhere('(course.title LIKE :q OR course.description LIKE :q)', { q });
+    }
+
+    qb.orderBy('course.createdAt', 'DESC').skip((page - 1) * limit).take(limit);
+
+    const [items, total] = await qb.getManyAndCount();
 
     return res.status(200).json({
       items: items.map(toCourseResponse),
@@ -392,45 +351,23 @@ router.get('/', auth, async (req, res, next) => {
  *       - bearerAuth: []
  *     requestBody:
  *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/CourseCreateRequest'
- *           examples:
- *             example:
- *               value:
- *                 title: Introduction to Cybersecurity
- *                 description: Learn core security concepts, threats, and best practices.
- *                 status: draft
- *                 tags: [security, fundamentals]
  *     responses:
  *       201:
  *         description: Course created
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Course'
  *       400:
  *         description: Validation error
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  *       401:
  *         description: Missing or invalid token
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  *       403:
  *         description: Insufficient permissions
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
   try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
     const { ok, errors, data } = validateCreatePayload(req.body);
 
     if (!ok) {
@@ -440,22 +377,26 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
     const now = new Date();
     const status = data.status || 'draft';
 
-    const course = await Course.create({
+    const courseRepo = ds.getRepository('Course');
+    const course = courseRepo.create({
       title: data.title,
       description: data.description || '',
       status,
       tags: data.tags || [],
-      createdBy: req.user?.id || null,
-      updatedBy: req.user?.id || null,
       publishedAt: status === 'published' ? now : null,
       deletedAt: null,
+      createdBy: req.user?.id ? { id: Number(req.user.id) } : null,
+      updatedBy: req.user?.id ? { id: Number(req.user.id) } : null,
     });
 
-    const populated = await Course.findById(course._id)
-      .populate('createdBy', 'email name role')
-      .lean();
+    const saved = await courseRepo.save(course);
 
-    return res.status(201).json(toCourseResponse(populated));
+    const hydrated = await courseRepo.findOne({
+      where: { id: saved.id },
+      relations: { createdBy: true },
+    });
+
+    return res.status(201).json(toCourseResponse(hydrated || saved));
   } catch (err) {
     return next(err);
   }
@@ -469,95 +410,37 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
  *     tags: [Courses]
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: courseId
- *         required: true
- *         schema:
- *           type: string
- *         description: Course id
- *     responses:
- *       200:
- *         description: Course
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Course'
- *       404:
- *         description: Course not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       401:
- *         description: Missing or invalid token
  *   patch:
  *     summary: Update a course
  *     tags: [Courses]
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: courseId
- *         required: true
- *         schema:
- *           type: string
- *         description: Course id
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/CourseUpdateRequest'
- *     responses:
- *       200:
- *         description: Updated course
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Course'
- *       400:
- *         description: Validation error
- *       404:
- *         description: Course not found
- *       401:
- *         description: Missing or invalid token
- *       403:
- *         description: Insufficient permissions
  *   delete:
  *     summary: Delete a course
- *     description: Deletes a course. Requires authentication.
  *     tags: [Courses]
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: courseId
- *         required: true
- *         schema:
- *           type: string
- *         description: Course id
- *     responses:
- *       204:
- *         description: Deleted
- *       404:
- *         description: Course not found
- *       401:
- *         description: Missing or invalid token
- *       403:
- *         description: Insufficient permissions
  */
 router.get('/:courseId', auth, async (req, res, next) => {
   try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
     const { courseId } = req.params;
 
-    if (!isValidObjectId(courseId)) {
+    if (!isValidId(courseId)) {
       return res.status(400).json({ message: 'Invalid courseId' });
     }
 
-    const course = await Course.findOne({ _id: courseId, deletedAt: null })
-      .populate('createdBy', 'email name role')
-      .lean();
+    const id = Number(courseId);
+    const courseRepo = ds.getRepository('Course');
+
+    const course = await courseRepo.findOne({
+      where: { id, deletedAt: null },
+      relations: { createdBy: true },
+    });
 
     if (!course) {
       return res.status(404).json({ message: 'Course not found' });
@@ -571,9 +454,14 @@ router.get('/:courseId', auth, async (req, res, next) => {
 
 router.patch('/:courseId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
   try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
     const { courseId } = req.params;
 
-    if (!isValidObjectId(courseId)) {
+    if (!isValidId(courseId)) {
       return res.status(400).json({ message: 'Invalid courseId' });
     }
 
@@ -582,36 +470,38 @@ router.patch('/:courseId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
       return res.status(400).json({ message: errors.join('; ') });
     }
 
-    // If status transitions to published, set publishedAt if not already set.
-    if (updates.status === 'published') {
-      updates.$set = updates.$set || {};
-      // we'll compute after fetching current state
-    }
+    const id = Number(courseId);
+    const courseRepo = ds.getRepository('Course');
 
-    const existing = await Course.findOne({ _id: courseId, deletedAt: null }).lean();
+    const existing = await courseRepo.findOne({
+      where: { id, deletedAt: null },
+    });
+
     if (!existing) {
       return res.status(404).json({ message: 'Course not found' });
     }
 
-    const updateDoc = { ...updates, updatedBy: req.user?.id || null };
-
+    // Handle publishedAt rules
     if (updates.status === 'published') {
       if (!existing.publishedAt) {
-        updateDoc.publishedAt = new Date();
+        updates.publishedAt = new Date();
       }
     }
     if (updates.status && updates.status !== 'published') {
-      // Clear publishedAt when moving away from published.
-      updateDoc.publishedAt = null;
+      updates.publishedAt = null;
     }
 
-    const updated = await Course.findOneAndUpdate(
-      { _id: courseId, deletedAt: null },
-      { $set: updateDoc },
-      { new: true, runValidators: true }
-    )
-      .populate('createdBy', 'email name role')
-      .lean();
+    // Track updater
+    if (req.user?.id) {
+      updates.updatedBy = { id: Number(req.user.id) };
+    }
+
+    await courseRepo.update({ id, deletedAt: null }, updates);
+
+    const updated = await courseRepo.findOne({
+      where: { id, deletedAt: null },
+      relations: { createdBy: true },
+    });
 
     if (!updated) {
       return res.status(404).json({ message: 'Course not found' });
@@ -625,26 +515,36 @@ router.patch('/:courseId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
 
 router.delete('/:courseId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
   try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
     const { courseId } = req.params;
 
-    if (!isValidObjectId(courseId)) {
+    if (!isValidId(courseId)) {
       return res.status(400).json({ message: 'Invalid courseId' });
     }
 
-    const updated = await Course.findOneAndUpdate(
-      { _id: courseId, deletedAt: null },
-      {
-        $set: {
-          deletedAt: new Date(),
-          updatedBy: req.user?.id || null,
-        },
-      },
-      { new: true }
-    ).lean();
+    const id = Number(courseId);
+    const courseRepo = ds.getRepository('Course');
 
-    if (!updated) {
+    const existing = await courseRepo.findOne({
+      where: { id, deletedAt: null },
+      select: { id: true },
+    });
+
+    if (!existing) {
       return res.status(404).json({ message: 'Course not found' });
     }
+
+    await courseRepo.update(
+      { id, deletedAt: null },
+      {
+        deletedAt: new Date(),
+        updatedBy: req.user?.id ? { id: Number(req.user.id) } : null,
+      }
+    );
 
     return res.status(204).send();
   } catch (err) {

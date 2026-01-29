@@ -52,12 +52,16 @@ function buildMySqlDataSourceOptionsFromEnv() {
     password,
     database,
 
-    // Migration phase: no entities yet; this DataSource is primarily for connectivity.
-    // Entities will be added in later subtasks without removing existing Mongo models yet.
-    entities: [],
+    // TypeORM entities (replacing Mongoose models).
+    entities: [
+      require('../entities/User').UserEntity,
+      require('../entities/Course').CourseEntity,
+      require('../entities/Lesson').LessonEntity,
+    ],
 
-    // Never enable synchronize in production unintentionally.
-    synchronize: false,
+    // For this migration step we use synchronize so the service can boot end-to-end.
+    // In production, this should be replaced by migrations.
+    synchronize: process.env.TYPEORM_SYNC === 'true' || process.env.NODE_ENV !== 'production',
 
     // Keep logs low-noise; can be adjusted later.
     logging: false,

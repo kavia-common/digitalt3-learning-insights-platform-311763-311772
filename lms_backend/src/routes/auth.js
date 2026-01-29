@@ -1,9 +1,9 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 
-const User = require('../models/User');
 const authMiddleware = require('../middleware/auth');
 const { signAccessToken } = require('../utils/jwt');
+const { getDataSource } = require('../config/db');
 
 const router = express.Router();
 
@@ -114,9 +114,18 @@ router.post('/register', async (req, res, next) => {
       return res.status(400).json({ message: 'Password must be at least 8 characters' });
     }
 
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const userRepo = ds.getRepository('User');
     const normalizedEmail = email.trim().toLowerCase();
 
-    const existing = await User.findOne({ email: normalizedEmail }).lean();
+    const existing = await userRepo.findOne({
+      where: { email: normalizedEmail },
+      select: { id: true },
+    });
     if (existing) {
       return res.status(400).json({ message: 'Email already in use' });
     }
@@ -124,15 +133,16 @@ router.post('/register', async (req, res, next) => {
     // bcrypt default 10 salt rounds is OK; use 12 for a bit stronger without being excessive.
     const passwordHash = await bcrypt.hash(password, 12);
 
-    const user = await User.create({
+    const created = userRepo.create({
       email: normalizedEmail,
       passwordHash,
       name: name.trim(),
       role: role || 'learner',
     });
+    const user = await userRepo.save(created);
 
     const token = signAccessToken({
-      sub: String(user._id),
+      sub: String(user.id),
       email: user.email,
       role: user.role,
       name: user.name,
@@ -140,11 +150,11 @@ router.post('/register', async (req, res, next) => {
 
     return res.status(201).json({
       token,
-      user: { id: String(user._id), email: user.email, name: user.name, role: user.role },
+      user: { id: String(user.id), email: user.email, name: user.name, role: user.role },
     });
   } catch (err) {
-    // Handle mongoose unique constraint errors
-    if (err && err.code === 11000) {
+    // Handle MySQL unique constraint errors (e.g., ER_DUP_ENTRY)
+    if (err && (err.code === 'ER_DUP_ENTRY' || err.errno === 1062)) {
       return res.status(400).json({ message: 'Email already in use' });
     }
     return next(err);
@@ -186,10 +196,19 @@ router.post('/login', async (req, res, next) => {
       return res.status(400).json({ message: 'Password is required' });
     }
 
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const userRepo = ds.getRepository('User');
     const normalizedEmail = email.trim().toLowerCase();
 
     // Need passwordHash for verification
-    const user = await User.findOne({ email: normalizedEmail }).select('+passwordHash email name role');
+    const user = await userRepo.findOne({
+      where: { email: normalizedEmail },
+      select: { id: true, email: true, name: true, role: true, passwordHash: true },
+    });
 
     if (!user) {
       return res.status(401).json({ message: 'Invalid credentials' });
@@ -201,7 +220,7 @@ router.post('/login', async (req, res, next) => {
     }
 
     const token = signAccessToken({
-      sub: String(user._id),
+      sub: String(user.id),
       email: user.email,
       role: user.role,
       name: user.name,
@@ -209,7 +228,7 @@ router.post('/login', async (req, res, next) => {
 
     return res.status(200).json({
       token,
-      user: { id: String(user._id), email: user.email, name: user.name, role: user.role },
+      user: { id: String(user.id), email: user.email, name: user.name, role: user.role },
     });
   } catch (err) {
     return next(err);

@@ -1,5 +1,5 @@
-const User = require('../models/User');
 const { verifyAccessToken } = require('../utils/jwt');
+const { getDataSource } = require('../config/db');
 
 // PUBLIC_INTERFACE
 async function auth(req, res, next) {
@@ -20,19 +20,31 @@ async function auth(req, res, next) {
     }
 
     // Token claims include: sub (user id), email, role, name
-    const userId = decoded.sub;
-    if (!userId) {
+    const userIdRaw = decoded.sub;
+    const userId = Number.parseInt(String(userIdRaw || ''), 10);
+    if (!Number.isFinite(userId)) {
       return res.status(401).json({ message: 'Invalid token claims' });
     }
 
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      // Cannot validate user existence without DB; fail closed.
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
     // Optionally verify user still exists.
-    const user = await User.findById(userId).select('email name role').lean();
+    const userRepo = ds.getRepository('User');
+    const user = await userRepo.findOne({
+      where: { id: userId },
+      select: { id: true, email: true, name: true, role: true },
+    });
+
     if (!user) {
       return res.status(401).json({ message: 'User no longer exists' });
     }
 
     req.user = {
-      id: String(user._id),
+      id: String(user.id),
       email: user.email,
       name: user.name,
       role: user.role,

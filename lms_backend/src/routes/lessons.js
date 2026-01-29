@@ -1,8 +1,12 @@
 const express = require('express');
 
 const auth = require('../middleware/auth');
+const rbac = require('../middleware/rbac');
+const { getDataSource } = require('../config/db');
 
 const router = express.Router();
+
+const WRITE_ROLES = ['admin', 'instructor'];
 
 /**
  * @swagger
@@ -82,6 +86,112 @@ const router = express.Router();
  *           example: published
  */
 
+function isValidId(raw) {
+  const n = Number.parseInt(String(raw || ''), 10);
+  return Number.isFinite(n) && n > 0;
+}
+
+function toLessonResponse(lesson) {
+  return {
+    id: String(lesson.id),
+    courseId: lesson.courseId
+      ? String(lesson.courseId)
+      : lesson.course?.id
+        ? String(lesson.course.id)
+        : undefined,
+    title: lesson.title,
+    content: lesson.content,
+    order: lesson.order,
+    status: lesson.status,
+    createdAt: lesson.createdAt,
+    updatedAt: lesson.updatedAt,
+  };
+}
+
+function validateCreatePayload(body) {
+  const errors = [];
+  const courseIdRaw = body?.courseId;
+
+  if (!isValidId(courseIdRaw)) {
+    errors.push('courseId is required and must be a positive integer');
+  }
+
+  const title = body?.title;
+  if (!title || typeof title !== 'string' || title.trim().length < 3) {
+    errors.push('title is required and must be at least 3 characters');
+  }
+
+  const content = body?.content;
+  if (content !== undefined && typeof content !== 'string') {
+    errors.push('content must be a string');
+  }
+
+  const order = body?.order;
+  if (order !== undefined && (!Number.isFinite(Number(order)) || Number(order) < 0)) {
+    errors.push('order must be a non-negative integer');
+  }
+
+  const status = body?.status;
+  if (status !== undefined && !['draft', 'published', 'archived'].includes(status)) {
+    errors.push('status must be one of: draft, published, archived');
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    data: {
+      courseId: Number.parseInt(String(courseIdRaw || ''), 10),
+      title: typeof title === 'string' ? title.trim() : undefined,
+      content: typeof content === 'string' ? content : undefined,
+      order: order !== undefined ? Math.floor(Number(order)) : undefined,
+      status,
+    },
+  };
+}
+
+function validateUpdatePayload(body) {
+  const errors = [];
+  const updates = {};
+
+  if (body?.title !== undefined) {
+    if (typeof body.title !== 'string' || body.title.trim().length < 3) {
+      errors.push('title must be a string of at least 3 characters');
+    } else {
+      updates.title = body.title.trim();
+    }
+  }
+
+  if (body?.content !== undefined) {
+    if (typeof body.content !== 'string') {
+      errors.push('content must be a string');
+    } else {
+      updates.content = body.content;
+    }
+  }
+
+  if (body?.order !== undefined) {
+    if (!Number.isFinite(Number(body.order)) || Number(body.order) < 0) {
+      errors.push('order must be a non-negative integer');
+    } else {
+      updates.order = Math.floor(Number(body.order));
+    }
+  }
+
+  if (body?.status !== undefined) {
+    if (!['draft', 'published', 'archived'].includes(body.status)) {
+      errors.push('status must be one of: draft, published, archived');
+    } else {
+      updates.status = body.status;
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    errors.push('At least one field must be provided to update');
+  }
+
+  return { ok: errors.length === 0, errors, updates };
+}
+
 /**
  * @swagger
  * /lessons:
@@ -91,89 +201,102 @@ const router = express.Router();
  *     tags: [Lessons]
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: courseId
- *         schema:
- *           type: string
- *         description: Optional course id to filter lessons
- *       - in: query
- *         name: page
- *         schema:
- *           type: integer
- *           minimum: 1
- *           default: 1
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           minimum: 1
- *           maximum: 100
- *           default: 20
- *     responses:
- *       200:
- *         description: Paginated lessons list
- *         content:
- *           application/json:
- *             examples:
- *               example:
- *                 value:
- *                   items:
- *                     - id: 7700c2c6e6f5c2f0a1b2c3d4
- *                       courseId: 6600c2c6e6f5c2f0a1b2c3d4
- *                       title: Threat Modeling Basics
- *                       order: 1
- *                       status: draft
- *                       createdAt: '2025-01-01T00:00:00.000Z'
- *                       updatedAt: '2025-01-02T00:00:00.000Z'
- *                   page: 1
- *                   limit: 20
- *                   total: 1
- *             schema:
- *               type: object
- *               properties:
- *                 items:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/Lesson'
- *                 page:
- *                   type: integer
- *                 limit:
- *                   type: integer
- *                 total:
- *                   type: integer
- *       401:
- *         description: Missing or invalid token
+ */
+router.get('/', auth, async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const pageRaw = Number(req.query.page || 1);
+    const limitRaw = Number(req.query.limit || 20);
+
+    const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+    const limit = Number.isFinite(limitRaw) ? Math.min(100, Math.max(1, Math.floor(limitRaw))) : 20;
+
+    const courseId = req.query.courseId;
+    if (courseId !== undefined && !isValidId(courseId)) {
+      return res.status(400).json({ message: 'Invalid courseId filter' });
+    }
+
+    const qb = ds.getRepository('Lesson').createQueryBuilder('lesson').where('lesson.deletedAt IS NULL');
+
+    if (courseId !== undefined) {
+      qb.andWhere('lesson.courseId = :courseId', { courseId: Number(courseId) });
+    }
+
+    qb.orderBy('lesson.order', 'ASC')
+      .addOrderBy('lesson.createdAt', 'ASC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [items, total] = await qb.getManyAndCount();
+
+    return res.status(200).json({
+      items: items.map(toLessonResponse),
+      page,
+      limit,
+      total,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /lessons:
  *   post:
  *     summary: Create a lesson
  *     description: Creates a new lesson. Requires authentication.
  *     tags: [Lessons]
  *     security:
  *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/LessonCreateRequest'
- *     responses:
- *       201:
- *         description: Lesson created
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Lesson'
- *       400:
- *         description: Validation error
- *       401:
- *         description: Missing or invalid token
  */
-router.get('/', auth, async (req, res) => {
-  return res.status(200).json({ items: [], page: 1, limit: 20, total: 0 });
-});
+router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
 
-router.post('/', auth, async (req, res) => {
-  return res.status(501).json({ message: 'Not implemented' });
+    const { ok, errors, data } = validateCreatePayload(req.body);
+    if (!ok) {
+      return res.status(400).json({ message: errors.join('; ') });
+    }
+
+    // Ensure course exists and isn't deleted
+    const courseRepo = ds.getRepository('Course');
+    const course = await courseRepo.findOne({
+      where: { id: data.courseId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!course) {
+      return res.status(400).json({ message: 'courseId does not refer to an existing course' });
+    }
+
+    const lessonRepo = ds.getRepository('Lesson');
+    const lesson = lessonRepo.create({
+      title: data.title,
+      content: data.content || '',
+      order: data.order !== undefined ? data.order : 0,
+      status: data.status || 'draft',
+      deletedAt: null,
+      course: { id: course.id },
+    });
+
+    const saved = await lessonRepo.save(lesson);
+
+    return res.status(201).json(
+      toLessonResponse({
+        ...saved,
+        courseId: course.id,
+      })
+    );
+  } catch (err) {
+    return next(err);
+  }
 });
 
 /**
@@ -185,121 +308,135 @@ router.post('/', auth, async (req, res) => {
  *     tags: [Lessons]
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: courseId
- *         required: true
- *         schema:
- *           type: string
- *         description: Course id
- *     responses:
- *       200:
- *         description: Lessons for the course
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 items:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/Lesson'
- *                 total:
- *                   type: integer
- *       401:
- *         description: Missing or invalid token
  */
-router.get('/by-course/:courseId', auth, async (req, res) => {
-  return res.status(200).json({ items: [], total: 0 });
+router.get('/by-course/:courseId', auth, async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const { courseId } = req.params;
+    if (!isValidId(courseId)) {
+      return res.status(400).json({ message: 'Invalid courseId' });
+    }
+
+    const lessonRepo = ds.getRepository('Lesson');
+    const items = await lessonRepo.find({
+      where: { deletedAt: null, course: { id: Number(courseId) } },
+      order: { order: 'ASC', createdAt: 'ASC' },
+    });
+
+    return res.status(200).json({ items: items.map(toLessonResponse), total: items.length });
+  } catch (err) {
+    return next(err);
+  }
 });
 
-/**
- * @swagger
- * /lessons/{lessonId}:
- *   get:
- *     summary: Get a lesson by id
- *     tags: [Lessons]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: lessonId
- *         required: true
- *         schema:
- *           type: string
- *         description: Lesson id
- *     responses:
- *       200:
- *         description: Lesson
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Lesson'
- *       404:
- *         description: Lesson not found
- *       401:
- *         description: Missing or invalid token
- *   patch:
- *     summary: Update a lesson
- *     tags: [Lessons]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: lessonId
- *         required: true
- *         schema:
- *           type: string
- *         description: Lesson id
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/LessonUpdateRequest'
- *     responses:
- *       200:
- *         description: Updated lesson
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Lesson'
- *       400:
- *         description: Validation error
- *       404:
- *         description: Lesson not found
- *       401:
- *         description: Missing or invalid token
- *   delete:
- *     summary: Delete a lesson
- *     tags: [Lessons]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: lessonId
- *         required: true
- *         schema:
- *           type: string
- *         description: Lesson id
- *     responses:
- *       204:
- *         description: Deleted
- *       404:
- *         description: Lesson not found
- *       401:
- *         description: Missing or invalid token
- */
-router.get('/:lessonId', auth, async (req, res) => {
-  return res.status(501).json({ message: 'Not implemented' });
+router.get('/:lessonId', auth, async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const { lessonId } = req.params;
+    if (!isValidId(lessonId)) {
+      return res.status(400).json({ message: 'Invalid lessonId' });
+    }
+
+    const id = Number(lessonId);
+    const lessonRepo = ds.getRepository('Lesson');
+
+    const lesson = await lessonRepo.findOne({
+      where: { id, deletedAt: null },
+      relations: { course: true },
+    });
+
+    if (!lesson) {
+      return res.status(404).json({ message: 'Lesson not found' });
+    }
+
+    return res.status(200).json(toLessonResponse(lesson));
+  } catch (err) {
+    return next(err);
+  }
 });
 
-router.patch('/:lessonId', auth, async (req, res) => {
-  return res.status(501).json({ message: 'Not implemented' });
+router.patch('/:lessonId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const { lessonId } = req.params;
+    if (!isValidId(lessonId)) {
+      return res.status(400).json({ message: 'Invalid lessonId' });
+    }
+
+    const { ok, errors, updates } = validateUpdatePayload(req.body);
+    if (!ok) {
+      return res.status(400).json({ message: errors.join('; ') });
+    }
+
+    const id = Number(lessonId);
+    const lessonRepo = ds.getRepository('Lesson');
+
+    const existing = await lessonRepo.findOne({
+      where: { id, deletedAt: null },
+      select: { id: true },
+    });
+    if (!existing) {
+      return res.status(404).json({ message: 'Lesson not found' });
+    }
+
+    await lessonRepo.update({ id, deletedAt: null }, updates);
+
+    const updated = await lessonRepo.findOne({
+      where: { id, deletedAt: null },
+      relations: { course: true },
+    });
+
+    if (!updated) {
+      return res.status(404).json({ message: 'Lesson not found' });
+    }
+
+    return res.status(200).json(toLessonResponse(updated));
+  } catch (err) {
+    return next(err);
+  }
 });
 
-router.delete('/:lessonId', auth, async (req, res) => {
-  return res.status(501).json({ message: 'Not implemented' });
+router.delete('/:lessonId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const { lessonId } = req.params;
+    if (!isValidId(lessonId)) {
+      return res.status(400).json({ message: 'Invalid lessonId' });
+    }
+
+    const id = Number(lessonId);
+    const lessonRepo = ds.getRepository('Lesson');
+
+    const existing = await lessonRepo.findOne({
+      where: { id, deletedAt: null },
+      select: { id: true },
+    });
+    if (!existing) {
+      return res.status(404).json({ message: 'Lesson not found' });
+    }
+
+    await lessonRepo.update({ id, deletedAt: null }, { deletedAt: new Date() });
+
+    return res.status(204).send();
+  } catch (err) {
+    return next(err);
+  }
 });
 
 module.exports = router;
