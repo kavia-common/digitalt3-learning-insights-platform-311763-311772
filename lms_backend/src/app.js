@@ -64,15 +64,15 @@ app.get('/openapi.json', (req, res) => {
  * Interactive Swagger UI.
  * Note: Swagger UI will pull the spec from /openapi.json.
  */
-app.use(
-  '/api-docs',
-  swaggerUi.serve,
-  swaggerUi.setup(null, {
-    swaggerOptions: {
-      url: '/openapi.json',
-    },
-  })
-);
+const swaggerUiMiddleware = swaggerUi.setup(null, {
+  swaggerOptions: {
+    url: '/openapi.json',
+  },
+});
+
+// Mounted at both routes to retain backward compatibility (/api-docs) and add /docs.
+app.use('/api-docs', swaggerUi.serve, swaggerUiMiddleware);
+app.use('/docs', swaggerUi.serve, swaggerUiMiddleware);
 
 // Parse JSON request body
 app.use(express.json());
