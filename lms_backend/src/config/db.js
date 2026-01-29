@@ -1,88 +1,124 @@
-const mongoose = require('mongoose');
+const { DataSource } = require('typeorm');
 
 /**
- * Determines whether the provided MongoDB URI already contains a database path.
- * - For example, `mongodb://host:27017/mydb` has a db path.
- * - `mongodb+srv://cluster.example.net/?retryWrites=true` does not.
+ * Small helper to parse an integer env var safely.
+ * @param {string|undefined} value
+ * @param {number} fallback
+ * @returns {number}
  */
-function uriHasDatabasePath(mongoUri) {
-  try {
-    const u = new URL(mongoUri);
-    return Boolean(u.pathname && u.pathname !== '/' && u.pathname.length > 1);
-  } catch {
-    // URL() parsing can be unreliable for some mongodb connection strings; use a conservative fallback.
-    const afterProto = mongoUri.replace(/^mongodb(\+srv)?:\/\//, '');
-    // A db path looks like: host[:port]/dbname (and not just a trailing slash)
-    return afterProto.includes('/') && !afterProto.endsWith('/');
-  }
+function parseIntEnv(value, fallback) {
+  const n = Number.parseInt(String(value || ''), 10);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 /**
- * Build Mongo connection settings from env vars.
- *
- * We prefer using mongoose's `dbName` option (instead of mutating the URI) when:
- * - MONGODB_DB is provided, AND
- * - the URI does not already include a DB path.
- *
- * This plays nicely with MongoDB Atlas SRV connection strings like:
- * `mongodb+srv://<user>:<pass>@cluster0.xxxxx.mongodb.net/?appName=...`
+ * Returns a minimal, secret-free description of the target DB.
+ * @param {{host: string, port: number, database: string}} target
+ * @returns {string}
  */
-function buildMongoConnectionConfig() {
-  const mongoUri = process.env.MONGODB_URL;
-  const dbName = process.env.MONGODB_DB;
+function describeTarget(target) {
+  return `${target.host}:${target.port}/${target.database}`;
+}
 
-  if (!mongoUri) {
-    const err = new Error('MONGODB_URL is not configured');
-    err.code = 'MONGODB_URL_MISSING';
+/**
+ * Build MySQL DataSource config from env vars.
+ * Required: DB_HOST, DB_USERNAME, DB_PASSWORD, DEFAULT_DB
+ * Optional: DB_PORT (default 3306)
+ */
+function buildMySqlDataSourceOptionsFromEnv() {
+  const host = process.env.DB_HOST;
+  const port = parseIntEnv(process.env.DB_PORT, 3306);
+  const username = process.env.DB_USERNAME;
+  const password = process.env.DB_PASSWORD;
+  const database = process.env.DEFAULT_DB;
+
+  const missing = [];
+  if (!host) missing.push('DB_HOST');
+  if (!username) missing.push('DB_USERNAME');
+  if (!password) missing.push('DB_PASSWORD');
+  if (!database) missing.push('DEFAULT_DB');
+
+  if (missing.length > 0) {
+    const err = new Error(`MySQL env vars missing: ${missing.join(', ')}`);
+    err.code = 'MYSQL_ENV_MISSING';
     throw err;
   }
 
-  const config = { mongoUri, options: {} };
+  return {
+    type: 'mysql',
+    host,
+    port,
+    username,
+    password,
+    database,
 
-  if (dbName && !uriHasDatabasePath(mongoUri)) {
-    config.options.dbName = dbName;
+    // Migration phase: no entities yet; this DataSource is primarily for connectivity.
+    // Entities will be added in later subtasks without removing existing Mongo models yet.
+    entities: [],
+
+    // Never enable synchronize in production unintentionally.
+    synchronize: false,
+
+    // Keep logs low-noise; can be adjusted later.
+    logging: false,
+  };
+}
+
+let appDataSource = null;
+
+// PUBLIC_INTERFACE
+function getDataSource() {
+  /** Returns the singleton TypeORM DataSource instance, if created. */
+  return appDataSource;
+}
+
+// PUBLIC_INTERFACE
+async function initializeDataSource() {
+  /**
+   * Initializes TypeORM DataSource (MySQL) using environment variables.
+   * Returns the DataSource instance.
+   */
+  if (appDataSource && appDataSource.isInitialized) {
+    return appDataSource;
   }
 
-  return config;
-}
+  const options = buildMySqlDataSourceOptionsFromEnv();
+  const target = { host: options.host, port: options.port, database: options.database };
 
-// PUBLIC_INTERFACE
-function getConfiguredDbName() {
-  /** Returns the effective DB name (from env/dbName option or current connection), if known. */
-  return (
-    process.env.MONGODB_DB ||
-    mongoose.connection?.db?.databaseName ||
-    null
-  );
-}
+  // Safe log: no secrets.
+  console.log(`MySQL configuring connection target: ${describeTarget(target)}`);
 
-// PUBLIC_INTERFACE
-async function connectToDatabase() {
-  /** Connects to MongoDB and returns the mongoose connection. */
-  const { mongoUri, options } = buildMongoConnectionConfig();
+  appDataSource = new DataSource(options);
+  await appDataSource.initialize();
 
-  // Keep connection options minimal; mongoose has good defaults in v8.
-  await mongoose.connect(mongoUri, options);
-
-  return mongoose.connection;
+  console.log(`MySQL connected: ${describeTarget(target)}`);
+  return appDataSource;
 }
 
 // PUBLIC_INTERFACE
 async function checkDatabaseConnectivity() {
-  /** Checks DB connectivity (ping) and returns boolean. */
+  /** Checks DB connectivity (simple ping) and returns boolean. */
   try {
-    if (mongoose.connection.readyState !== 1) {
+    if (!appDataSource || !appDataSource.isInitialized) {
       return false;
     }
-    await mongoose.connection.db.admin().ping();
+    // MySQL ping via a trivial query.
+    await appDataSource.query('SELECT 1');
     return true;
   } catch {
     return false;
   }
 }
 
+// PUBLIC_INTERFACE
+function getConfiguredDbName() {
+  /** Returns the configured MySQL database name, if known. */
+  return process.env.DEFAULT_DB || null;
+}
+
 module.exports = {
-  connectToDatabase,
+  initializeDataSource,
   checkDatabaseConnectivity,
   getConfiguredDbName,
+  getDataSource,
 };
