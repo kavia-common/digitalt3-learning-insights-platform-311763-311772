@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const app = require('./app');
-const { connectToDatabase } = require('./config/db');
+const { connectToDatabase, getConfiguredDbName } = require('./config/db');
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -14,17 +14,23 @@ async function start() {
   const mongoUri = process.env.MONGODB_URL;
   const atlasMode = isLikelyAtlasUri(mongoUri);
 
+  // Startup log: indicate Atlas mode (if applicable) and effective DB name, without secrets.
+  const configuredDbName = getConfiguredDbName() || '(default)';
+  if (atlasMode) {
+    console.log(`[Atlas mode] Mongo configured (db: ${configuredDbName}).`);
+  }
+
   try {
     await connectToDatabase();
 
     // Do not log credentials. Only log a safe/high-level indicator of configured DB.
-    const dbName = process.env.MONGODB_DB || '(default)';
+    const dbName = getConfiguredDbName() || '(default)';
     console.log(`MongoDB connected (db: ${dbName})`);
   } catch (err) {
     // If we're in Atlas mode, do NOT fail startup just because DB isn't reachable yet.
     // This allows backend preview to boot even when the local lms_database container is down.
     if (atlasMode) {
-      const dbName = process.env.MONGODB_DB || '(default)';
+      const dbName = getConfiguredDbName() || '(default)';
       console.warn(
         `[Atlas mode] MongoDB connection failed at startup (db: ${dbName}). ` +
           `Continuing to start server without DB. Error: ${err.message}`

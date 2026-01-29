@@ -1,9 +1,11 @@
-const { checkDatabaseConnectivity } = require('../config/db');
+const { checkDatabaseConnectivity, getConfiguredDbName } = require('../config/db');
 
 class HealthService {
   async getStatus() {
     const dbConnected = await checkDatabaseConnectivity();
     const jwtConfigured = Boolean(process.env.JWT_SECRET);
+
+    const dbName = getConfiguredDbName();
 
     return {
       status: 'ok',
@@ -12,6 +14,8 @@ class HealthService {
       environment: process.env.NODE_ENV || 'development',
       db: {
         connected: dbConnected,
+        status: dbConnected ? 'connected' : 'disconnected',
+        dbName: dbName || undefined,
       },
       auth: {
         jwtConfigured,

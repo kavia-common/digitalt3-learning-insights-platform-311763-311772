@@ -47,6 +47,16 @@ function buildMongoConnectionConfig() {
 }
 
 // PUBLIC_INTERFACE
+function getConfiguredDbName() {
+  /** Returns the effective DB name (from env/dbName option or current connection), if known. */
+  return (
+    process.env.MONGODB_DB ||
+    mongoose.connection?.db?.databaseName ||
+    null
+  );
+}
+
+// PUBLIC_INTERFACE
 async function connectToDatabase() {
   /** Connects to MongoDB and returns the mongoose connection. */
   const { mongoUri, options } = buildMongoConnectionConfig();
@@ -74,4 +84,5 @@ async function checkDatabaseConnectivity() {
 module.exports = {
   connectToDatabase,
   checkDatabaseConnectivity,
+  getConfiguredDbName,
 };
