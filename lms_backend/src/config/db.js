@@ -1,3 +1,4 @@
+const path = require('path');
 const { DataSource } = require('typeorm');
 
 /**
@@ -44,6 +45,8 @@ function buildMySqlDataSourceOptionsFromEnv() {
     throw err;
   }
 
+  const migrationsDir = path.join(__dirname, '..', 'migrations');
+
   return {
     type: 'mysql',
     host,
@@ -59,9 +62,21 @@ function buildMySqlDataSourceOptionsFromEnv() {
       require('../entities/Lesson').LessonEntity,
     ],
 
-    // For this migration step we use synchronize so the service can boot end-to-end.
-    // In production, this should be replaced by migrations.
-    synchronize: process.env.TYPEORM_SYNC === 'true' || process.env.NODE_ENV !== 'production',
+    // TypeORM migrations (JS files). These are executed via scripts in package.json.
+    migrations: [path.join(migrationsDir, '*.js')],
+
+    /**
+     * IMPORTANT:
+     * - Do not rely on synchronize for production.
+     * - Default to false unless TYPEORM_SYNC=true is explicitly set.
+     */
+    synchronize: process.env.TYPEORM_SYNC === 'true',
+
+    /**
+     * migrationsRun is intentionally false: we run migrations explicitly (CI / deploy step)
+     * using npm scripts so it's predictable and safe.
+     */
+    migrationsRun: false,
 
     // Keep logs low-noise; can be adjusted later.
     logging: false,
@@ -80,6 +95,13 @@ let initializationPromise = null;
 function getDataSource() {
   /** Returns the singleton TypeORM DataSource instance, if created. */
   return appDataSource;
+}
+
+// PUBLIC_INTERFACE
+function createDataSourceFromEnv() {
+  /** Creates a non-initialized TypeORM DataSource using environment variables. */
+  const options = buildMySqlDataSourceOptionsFromEnv();
+  return new DataSource(options);
 }
 
 // PUBLIC_INTERFACE
@@ -147,4 +169,6 @@ module.exports = {
   checkDatabaseConnectivity,
   getConfiguredDbName,
   getDataSource,
+  createDataSourceFromEnv,
 };
+
