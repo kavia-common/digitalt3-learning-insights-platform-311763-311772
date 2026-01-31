@@ -22,6 +22,21 @@ const LessonEntity = new EntitySchema({
     },
 
     /**
+     * Video fields (persisted):
+     * - videoUrl: stores the S3 object key (NOT a public URL)
+     * - duration: integer duration in minutes
+     */
+    videoUrl: {
+      type: 'varchar',
+      length: 1024,
+      nullable: true,
+    },
+    duration: {
+      type: 'int',
+      nullable: true,
+    },
+
+    /**
      * AI generated fields (persisted):
      * - aiSummary: concise 3-paragraph summary (stored in MySQL TEXT)
      * - aiQuizJson: JSON array of 5 MCQs
@@ -60,10 +75,7 @@ const LessonEntity = new EntitySchema({
       updateDate: true,
     },
   },
-  indices: [
-    { columns: ['deletedAt'] },
-    { columns: ['createdAt'] },
-  ],
+  indices: [{ columns: ['deletedAt'] }, { columns: ['createdAt'] }],
   relations: {
     course: {
       type: 'many-to-one',

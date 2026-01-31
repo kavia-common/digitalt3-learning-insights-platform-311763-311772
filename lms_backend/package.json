@@ -8,16 +8,16 @@
     "dev": "nodemon src/server.js",
     "test": "jest",
     "lint": "eslint .",
-
     "db:migrate": "node ./node_modules/typeorm/cli.js -d ./src/typeorm-datasource.js migration:run",
     "db:migrate:revert": "node ./node_modules/typeorm/cli.js -d ./src/typeorm-datasource.js migration:revert",
     "db:migrate:show": "node ./node_modules/typeorm/cli.js -d ./src/typeorm-datasource.js migration:show",
-
     "db:seed": "node ./src/seeds/seed.js",
     "db:init": "node ./src/scripts/db-init.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
+    "@aws-sdk/client-s3": "^3.758.0",
+    "@aws-sdk/s3-request-presigner": "^3.758.0",
     "bcrypt": "^6.0.0",
     "cors": "2.8.5",
     "dotenv": "^16.3.1",
@@ -55,4 +55,3 @@
     "migrationsAndSeeding": "Usage: npm run db:migrate (apply), npm run db:migrate:revert (undo last), npm run db:migrate:show (list), npm run db:seed (seed admin/instructor/learner + sample courses/lessons). Ensure env vars DB_HOST, DB_PORT, DB_USERNAME, DB_PASSWORD, DEFAULT_DB are set. Avoid TYPEORM_SYNC in production; use migrations instead."
   }
 }
-

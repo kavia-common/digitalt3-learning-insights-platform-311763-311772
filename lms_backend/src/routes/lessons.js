@@ -4,6 +4,7 @@ const auth = require('../middleware/auth');
 const rbac = require('../middleware/rbac');
 const { getDataSource } = require('../config/db');
 const { createAIService } = require('../services/ai');
+const { getUploadPresignedUrl, getPresignedUrl } = require('../services/storage');
 
 const router = express.Router();
 
@@ -18,6 +19,8 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  * tags:
  *   - name: Lessons
  *     description: Lesson management endpoints
+ *   - name: Storage
+ *     description: Video storage (S3) helper endpoints
  */
 
 /**
@@ -51,6 +54,16 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  *         content:
  *           type: string
  *           example: Lesson content (markdown or HTML)...
+ *         videoUrl:
+ *           type: string
+ *           nullable: true
+ *           description: S3 object key for the lesson video (not a public URL)
+ *           example: lessons/101/video.mp4
+ *         duration:
+ *           type: integer
+ *           nullable: true
+ *           description: Video duration in minutes
+ *           example: 15
  *         aiSummary:
  *           type: string
  *           nullable: true
@@ -95,12 +108,12 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  *           example: Identify threats early and choose mitigations.
  *         duration:
  *           type: integer
- *           description: Optional duration in minutes (currently not persisted in DB schema; accepted for forward compatibility)
+ *           description: Optional duration in minutes
  *           example: 15
  *         videoUrl:
  *           type: string
- *           description: Optional video URL (currently not persisted in DB schema; accepted for forward compatibility)
- *           example: https://cdn.example.com/video.mp4
+ *           description: Optional S3 object key for the video (not a public URL)
+ *           example: lessons/101/video.mp4
  *         order:
  *           type: integer
  *           minimum: 0
@@ -112,7 +125,7 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  *           example: draft
  *         content:
  *           type: string
- *           description: Lesson content (markdown or HTML). If description/videoUrl are provided, they may be embedded into content.
+ *           description: Lesson content (markdown or HTML). If description is provided, it may be embedded into content.
  *           example: Lesson content (markdown or HTML)...
  *     LessonUpdateRequest:
  *       type: object
@@ -135,7 +148,7 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  *           example: 20
  *         videoUrl:
  *           type: string
- *           example: https://cdn.example.com/video2.mp4
+ *           example: lessons/101/video-v2.mp4
  *         order:
  *           type: integer
  *           minimum: 0
@@ -207,27 +220,47 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  *           nullable: true
  *           items:
  *             $ref: '#/components/schemas/LessonQuizQuestion'
+ *     LessonUploadUrlRequest:
+ *       type: object
+ *       required: [lessonId, fileName]
+ *       properties:
+ *         lessonId:
+ *           type: integer
+ *           format: int32
+ *           description: Lesson id to associate the video with
+ *           example: 101
+ *         fileName:
+ *           type: string
+ *           description: Original file name (used to derive an S3 key extension)
+ *           example: intro.mp4
+ *         contentType:
+ *           type: string
+ *           description: Optional content-type (recommended), e.g. video/mp4
+ *           example: video/mp4
+ *     LessonUploadUrlResponse:
+ *       type: object
+ *       properties:
+ *         fileKey:
+ *           type: string
+ *           description: S3 object key to upload to
+ *           example: lessons/101/intro.mp4
+ *         uploadUrl:
+ *           type: string
+ *           description: Presigned PUT URL for direct upload
+ *     LessonVideoViewUrlResponse:
+ *       type: object
+ *       properties:
+ *         fileKey:
+ *           type: string
+ *           example: lessons/101/intro.mp4
+ *         viewUrl:
+ *           type: string
+ *           description: Presigned GET URL for temporary private viewing
  */
 
 function isValidId(raw) {
   const n = Number.parseInt(String(raw || ''), 10);
   return Number.isFinite(n) && n > 0;
-}
-
-function parsePositiveInt(raw, fallback) {
-  const n = Number.parseInt(String(raw || ''), 10);
-  if (!Number.isFinite(n)) {
-    return fallback;
-  }
-  return n;
-}
-
-function parseNonNegativeInt(raw, fallback) {
-  const n = Number.parseInt(String(raw || ''), 10);
-  if (!Number.isFinite(n) || n < 0) {
-    return fallback;
-  }
-  return n;
 }
 
 function normalizeString(value) {
@@ -241,25 +274,6 @@ function normalizeString(value) {
   return trimmed.length === 0 ? '' : trimmed;
 }
 
-function isValidOptionalUrl(raw) {
-  if (raw === undefined || raw === null || raw === '') {
-    return true;
-  }
-  if (typeof raw !== 'string') {
-    return false;
-  }
-  try {
-    new URL(raw);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Convert DB entity (Lesson) to API response shape.
- * Works with objects returned by repository/query builder.
- */
 function toLessonResponse(lesson) {
   return {
     id: String(lesson.id),
@@ -270,6 +284,8 @@ function toLessonResponse(lesson) {
         : undefined,
     title: lesson.title,
     content: lesson.content,
+    videoUrl: lesson.videoUrl ?? null,
+    duration: Number.isFinite(Number(lesson.duration)) ? Number(lesson.duration) : lesson.duration ?? null,
     aiSummary: lesson.aiSummary ?? null,
     aiQuizJson: lesson.aiQuizJson ?? null,
     order: lesson.order,
@@ -279,11 +295,6 @@ function toLessonResponse(lesson) {
   };
 }
 
-/**
- * Stronger validation for create payload.
- * We accept additional fields (description, duration, videoUrl) for forward compatibility,
- * but only persist what the current schema supports (title/content/order/status/course relation).
- */
 function validateCreatePayload(body) {
   const errors = [];
 
@@ -306,9 +317,11 @@ function validateCreatePayload(body) {
     errors.push('content must be a string');
   }
 
-  const descriptionNormalized = normalizeString(body?.description);
-  if (descriptionNormalized === null) {
-    errors.push('description must be a string');
+  const videoUrl = body?.videoUrl;
+  if (videoUrl !== undefined && videoUrl !== null && videoUrl !== '') {
+    if (typeof videoUrl !== 'string' || videoUrl.trim().length === 0) {
+      errors.push('videoUrl must be a non-empty string (S3 key) when provided');
+    }
   }
 
   const duration = body?.duration;
@@ -316,11 +329,6 @@ function validateCreatePayload(body) {
     if (!Number.isFinite(Number(duration)) || Number(duration) < 0) {
       errors.push('duration must be a non-negative number');
     }
-  }
-
-  const videoUrl = body?.videoUrl;
-  if (!isValidOptionalUrl(videoUrl)) {
-    errors.push('videoUrl must be a valid URL');
   }
 
   const order = body?.order;
@@ -335,22 +343,22 @@ function validateCreatePayload(body) {
     errors.push('status must be one of: draft, published, archived');
   }
 
-  // Build content payload (schema currently only has "content").
-  // If client sends description/videoUrl but no content, we still save a helpful content string.
+  // If client sends description but no content, still save something helpful.
+  const descriptionNormalized = normalizeString(body?.description);
+  if (descriptionNormalized === null) {
+    errors.push('description must be a string');
+  }
+
   let contentToPersist = typeof contentNormalized === 'string' ? contentNormalized : undefined;
   const pieces = [];
   if (descriptionNormalized && descriptionNormalized.length > 0) {
     pieces.push(descriptionNormalized);
-  }
-  if (videoUrl && typeof videoUrl === 'string' && videoUrl.trim().length > 0) {
-    pieces.push(`Video: ${videoUrl.trim()}`);
   }
   if (!contentToPersist || contentToPersist.trim().length === 0) {
     if (pieces.length > 0) {
       contentToPersist = pieces.join('\n\n');
     }
   } else if (pieces.length > 0) {
-    // Append optional metadata to content so nothing is lost for clients using newer fields.
     contentToPersist = `${contentToPersist}\n\n---\n${pieces.join('\n')}`;
   }
 
@@ -358,11 +366,13 @@ function validateCreatePayload(body) {
     ok: errors.length === 0,
     errors,
     data: {
-      courseId: parsePositiveInt(courseIdRaw, null),
+      courseId: Number(courseIdRaw),
       title: typeof titleNormalized === 'string' ? titleNormalized.trim() : undefined,
       content: typeof contentToPersist === 'string' ? contentToPersist : undefined,
       order: order !== undefined ? Math.floor(Number(order)) : undefined,
       status,
+      videoUrl: typeof videoUrl === 'string' ? videoUrl.trim() : undefined,
+      duration: duration !== undefined && duration !== null ? Math.floor(Number(duration)) : undefined,
     },
   };
 }
@@ -370,7 +380,6 @@ function validateCreatePayload(body) {
 function validateUpdatePayload(body) {
   const errors = [];
   const updates = {};
-  const meta = {};
 
   if (body?.courseId !== undefined) {
     if (!isValidId(body.courseId)) {
@@ -402,29 +411,23 @@ function validateUpdatePayload(body) {
     }
   }
 
-  if (body?.description !== undefined) {
-    const descriptionNormalized = normalizeString(body.description);
-    if (descriptionNormalized === null) {
-      errors.push('description must be a string');
+  if (body?.videoUrl !== undefined) {
+    if (body.videoUrl === null || body.videoUrl === '') {
+      updates.videoUrl = null;
+    } else if (typeof body.videoUrl !== 'string' || body.videoUrl.trim().length === 0) {
+      errors.push('videoUrl must be a non-empty string (S3 key) when provided');
     } else {
-      meta.description = descriptionNormalized;
+      updates.videoUrl = body.videoUrl.trim();
     }
   }
 
   if (body?.duration !== undefined) {
-    const duration = body.duration;
-    if (duration !== null && (!Number.isFinite(Number(duration)) || Number(duration) < 0)) {
+    if (body.duration === null) {
+      updates.duration = null;
+    } else if (!Number.isFinite(Number(body.duration)) || Number(body.duration) < 0) {
       errors.push('duration must be a non-negative number');
     } else {
-      meta.duration = duration;
-    }
-  }
-
-  if (body?.videoUrl !== undefined) {
-    if (!isValidOptionalUrl(body.videoUrl)) {
-      errors.push('videoUrl must be a valid URL');
-    } else {
-      meta.videoUrl = body.videoUrl;
+      updates.duration = Math.floor(Number(body.duration));
     }
   }
 
@@ -444,20 +447,12 @@ function validateUpdatePayload(body) {
     }
   }
 
-  // If any "meta" fields are provided but content isn't, we keep the API contract by embedding
-  // those into content rather than dropping them.
-  if (Object.keys(meta).length > 0 && updates.content === undefined) {
-    const pieces = [];
-    if (typeof meta.description === 'string' && meta.description.length > 0) {
-      pieces.push(meta.description);
-    }
-    if (meta.videoUrl && typeof meta.videoUrl === 'string' && meta.videoUrl.trim().length > 0) {
-      pieces.push(`Video: ${meta.videoUrl.trim()}`);
-    }
-    if (pieces.length > 0) {
-      // We will later merge with existing content in the handler (transactional read+write),
-      // because we don't want to overwrite content accidentally.
-      updates.__appendToContent = pieces.join('\n\n');
+  if (body?.description !== undefined && updates.content === undefined) {
+    const descriptionNormalized = normalizeString(body.description);
+    if (descriptionNormalized === null) {
+      errors.push('description must be a string');
+    } else if (descriptionNormalized && descriptionNormalized.length > 0) {
+      updates.__appendToContent = descriptionNormalized;
     }
   }
 
@@ -470,10 +465,7 @@ function validateUpdatePayload(body) {
 
 function parseListQueryParams(query) {
   const page = Math.max(1, Math.floor(Number.isFinite(Number(query.page)) ? Number(query.page) : 1));
-  const limit = Math.min(
-    100,
-    Math.max(1, Math.floor(Number.isFinite(Number(query.limit)) ? Number(query.limit) : 20))
-  );
+  const limit = Math.min(100, Math.max(1, Math.floor(Number.isFinite(Number(query.limit)) ? Number(query.limit) : 20)));
 
   const courseId = query.courseId;
   const search = typeof query.search === 'string' ? query.search.trim() : undefined;
@@ -487,15 +479,7 @@ function parseListQueryParams(query) {
   const includeCourseRaw = typeof query.includeCourse === 'string' ? query.includeCourse : undefined;
   const includeCourse = includeCourseRaw === 'true' || includeCourseRaw === '1';
 
-  return {
-    page,
-    limit,
-    courseId,
-    search,
-    sortBy,
-    sortOrder,
-    includeCourse,
-  };
+  return { page, limit, courseId, search, sortBy, sortOrder, includeCourse };
 }
 
 /**
@@ -563,21 +547,6 @@ function parseListQueryParams(query) {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/PaginatedLessonsResponse'
- *             examples:
- *               example:
- *                 value:
- *                   items:
- *                     - id: 101
- *                       courseId: 42
- *                       title: Threat Modeling Basics
- *                       content: Lesson content...
- *                       order: 1
- *                       status: draft
- *                       createdAt: "2025-01-01T10:00:00.000Z"
- *                       updatedAt: "2025-01-01T10:00:00.000Z"
- *                   page: 1
- *                   limit: 20
- *                   total: 1
  *       400:
  *         description: Invalid query parameters
  *         content:
@@ -596,9 +565,7 @@ router.get('/', auth, async (req, res, next) => {
       return res.status(503).json({ message: 'Database not available' });
     }
 
-    const { page, limit, courseId, search, sortBy, sortOrder, includeCourse } = parseListQueryParams(
-      req.query
-    );
+    const { page, limit, courseId, search, sortBy, sortOrder, includeCourse } = parseListQueryParams(req.query);
 
     if (courseId !== undefined && !isValidId(courseId)) {
       return res.status(400).json({ message: 'Invalid courseId filter' });
@@ -611,16 +578,8 @@ router.get('/', auth, async (req, res, next) => {
       return res.status(400).json({ message: `Invalid sortOrder (allowed: ${SORT_ORDERS.join(', ')})` });
     }
 
-    // Query optimization:
-    // - Always filter lesson.deletedAt IS NULL.
-    // - Optional filter courseId hits the FK index.
-    // - Search uses LIKE on title (ideally add DB index later if needed).
-    const qb = ds
-      .getRepository('Lesson')
-      .createQueryBuilder('lesson')
-      .where('lesson.deletedAt IS NULL');
+    const qb = ds.getRepository('Lesson').createQueryBuilder('lesson').where('lesson.deletedAt IS NULL');
 
-    // Optionally ensure course isn't soft-deleted too (requires join).
     if (includeCourse) {
       qb.innerJoin('lesson.course', 'course', 'course.deletedAt IS NULL');
     }
@@ -633,7 +592,6 @@ router.get('/', auth, async (req, res, next) => {
       qb.andWhere('lesson.title LIKE :q', { q: `%${search}%` });
     }
 
-    // Stable ordering: always add deterministic tie-breakers.
     qb.orderBy(`lesson.${sortBy}`, sortOrder).addOrderBy('lesson.id', 'ASC');
 
     qb.skip((page - 1) * limit).take(limit);
@@ -698,12 +656,10 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
       return res.status(400).json({ message: errors.join('; ') });
     }
 
-    // Use a transaction since we validate FK existence then insert.
     const created = await ds.transaction(async (manager) => {
       const courseRepo = manager.getRepository('Course');
       const lessonRepo = manager.getRepository('Lesson');
 
-      // Ensure course exists and isn't deleted
       const course = await courseRepo.findOne({
         where: { id: data.courseId, deletedAt: null },
         select: { id: true },
@@ -714,8 +670,6 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
         throw err;
       }
 
-      // Optional: avoid duplicate order within a course (soft-deleted lessons excluded).
-      // This is not enforced by a DB constraint, so we do a best-effort check.
       const orderToUse = data.order !== undefined ? data.order : 0;
       const existingSameOrder = await lessonRepo.findOne({
         where: { deletedAt: null, course: { id: course.id }, order: orderToUse },
@@ -731,6 +685,8 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
       const lesson = lessonRepo.create({
         title: data.title,
         content: data.content || '',
+        videoUrl: data.videoUrl || null,
+        duration: data.duration ?? null,
         order: orderToUse,
         status: data.status || 'draft',
         deletedAt: null,
@@ -748,7 +704,6 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
       })
     );
   } catch (err) {
-    // Localized handling for explicit validation errors thrown inside transaction.
     if (err && err.statusCode) {
       return res.status(err.statusCode).json({ message: err.message });
     }
@@ -836,7 +791,6 @@ router.get('/by-course/:courseId', auth, async (req, res, next) => {
       return res.status(400).json({ message: `Invalid sortOrder (allowed: ${SORT_ORDERS.join(', ')})` });
     }
 
-    // Use QB to support search + ordering.
     const qb = ds
       .getRepository('Lesson')
       .createQueryBuilder('lesson')
@@ -853,6 +807,260 @@ router.get('/by-course/:courseId', auth, async (req, res, next) => {
 
     return res.status(200).json({ items: items.map(toLessonResponse), total: items.length });
   } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/lessons/upload-url:
+ *   post:
+ *     summary: Get a presigned upload URL for a lesson video
+ *     description: >
+ *       Returns a presigned PUT URL to upload a video directly to S3. This keeps the backend fast.
+ *       The returned fileKey can be stored on the lesson as `videoUrl`.
+ *     tags: [Storage]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/LessonUploadUrlRequest'
+ *     responses:
+ *       200:
+ *         description: Upload URL generated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/LessonUploadUrlResponse'
+ *       400:
+ *         description: Validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
+ *       503:
+ *         description: Storage not configured
+ */
+router.post('/admin/lessons/upload-url', auth, rbac(WRITE_ROLES), async (req, res, next) => {
+  try {
+    const lessonId = req.body?.lessonId;
+    const fileName = req.body?.fileName;
+    const contentType = req.body?.contentType;
+
+    if (!isValidId(lessonId)) {
+      return res.status(400).json({ message: 'lessonId must be a positive integer' });
+    }
+    if (!fileName || typeof fileName !== 'string' || fileName.trim().length === 0) {
+      return res.status(400).json({ message: 'fileName is required' });
+    }
+
+    // Keep key deterministic and scoped by lesson id.
+    // We preserve extension if present.
+    const cleanedName = fileName.trim().replace(/[^a-zA-Z0-9._-]/g, '_');
+    const fileKey = `lessons/${Number(lessonId)}/${cleanedName}`;
+
+    const uploadUrl = await getUploadPresignedUrl(fileKey, {
+      contentType: typeof contentType === 'string' ? contentType : undefined,
+      expiresInSeconds: 900,
+    });
+
+    return res.status(200).json({ fileKey, uploadUrl });
+  } catch (err) {
+    if (err && (err.code === 'AWS_S3_BUCKET_NAME_MISSING' || err.code === 'S3_KEY_INVALID')) {
+      return res.status(503).json({ message: err.message });
+    }
+    return next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /lessons/{lessonId}/video-view-url:
+ *   post:
+ *     summary: Get a presigned view URL for a lesson video
+ *     description: >
+ *       Returns a presigned GET URL for the lesson's stored `videoUrl` (S3 key). This supports private video playback.
+ *     tags: [Storage]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *     responses:
+ *       200:
+ *         description: View URL generated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/LessonVideoViewUrlResponse'
+ *       400:
+ *         description: Invalid lessonId or lesson has no videoUrl
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       404:
+ *         description: Lesson not found
+ *       503:
+ *         description: Storage not configured
+ */
+router.post('/:lessonId/video-view-url', auth, async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const { lessonId } = req.params;
+    if (!isValidId(lessonId)) {
+      return res.status(400).json({ message: 'Invalid lessonId' });
+    }
+
+    const id = Number(lessonId);
+    const lessonRepo = ds.getRepository('Lesson');
+
+    const lesson = await lessonRepo.findOne({
+      where: { id, deletedAt: null },
+      select: { id: true, videoUrl: true },
+    });
+
+    if (!lesson) {
+      return res.status(404).json({ message: 'Lesson not found' });
+    }
+    if (!lesson.videoUrl || typeof lesson.videoUrl !== 'string' || lesson.videoUrl.trim().length === 0) {
+      return res.status(400).json({ message: 'Lesson has no videoUrl set' });
+    }
+
+    const fileKey = lesson.videoUrl.trim();
+    const viewUrl = await getPresignedUrl(fileKey, { expiresInSeconds: 900 });
+
+    return res.status(200).json({ fileKey, viewUrl });
+  } catch (err) {
+    if (err && err.code === 'AWS_S3_BUCKET_NAME_MISSING') {
+      return res.status(503).json({ message: err.message });
+    }
+    return next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /lessons/{lessonId}/generate-ai:
+ *   post:
+ *     summary: Generate AI summary and quiz for a lesson
+ *     description: >
+ *       Uses Anthropic Claude to generate a 3-paragraph summary and a 5-question MCQ quiz from the lesson content,
+ *       persists the results to the lesson record (aiSummary, aiQuizJson), and returns the generated fields.
+ *     tags: [AI]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational lesson id
+ *     responses:
+ *       200:
+ *         description: AI content generated and saved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GenerateAiResponse'
+ *       400:
+ *         description: Invalid lessonId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
+ *       404:
+ *         description: Lesson not found
+ *       503:
+ *         description: Database not available (or AI not configured)
+ */
+router.post('/:lessonId/generate-ai', auth, rbac(WRITE_ROLES), async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const { lessonId } = req.params;
+    if (!isValidId(lessonId)) {
+      return res.status(400).json({ message: 'Invalid lessonId' });
+    }
+
+    const id = Number(lessonId);
+
+    const result = await ds.transaction(async (manager) => {
+      const lessonRepo = manager.getRepository('Lesson');
+
+      const lesson = await lessonRepo.findOne({
+        where: { id, deletedAt: null },
+        select: {
+          id: true,
+          content: true,
+          aiSummary: true,
+          aiQuizJson: true,
+        },
+      });
+
+      if (!lesson) {
+        const err = new Error('Lesson not found');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const ai = createAIService();
+      const [aiSummary, aiQuizJson] = await Promise.all([
+        ai.generateSummary(lesson.content || ''),
+        ai.generateQuiz(lesson.content || ''),
+      ]);
+
+      lesson.aiSummary = aiSummary || null;
+      lesson.aiQuizJson = aiQuizJson || null;
+      await lessonRepo.save(lesson);
+
+      return {
+        lessonId: lesson.id,
+        aiSummary: lesson.aiSummary,
+        aiQuizJson: lesson.aiQuizJson,
+      };
+    });
+
+    return res.status(200).json(result);
+  } catch (err) {
+    if (err && err.code === 'ANTHROPIC_API_KEY_MISSING') {
+      return res.status(503).json({ message: 'AI service not configured (missing ANTHROPIC_API_KEY)' });
+    }
+    if (err && err.code && String(err.code).startsWith('AI_OUTPUT_')) {
+      return res.status(502).json({ message: err.message });
+    }
+    if (err && err.code === 'AI_INPUT_INVALID') {
+      return res.status(400).json({ message: err.message });
+    }
+    if (err && err.statusCode) {
+      return res.status(err.statusCode).json({ message: err.message });
+    }
     return next(err);
   }
 });
@@ -890,10 +1098,6 @@ router.get('/by-course/:courseId', auth, async (req, res, next) => {
  *         description: Missing or invalid token
  *       404:
  *         description: Lesson not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  *       503:
  *         description: Database not available
  *   patch:
@@ -935,10 +1139,6 @@ router.get('/by-course/:courseId', auth, async (req, res, next) => {
  *         description: Insufficient permissions
  *       404:
  *         description: Lesson not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  *       503:
  *         description: Database not available
  *   delete:
@@ -970,186 +1170,9 @@ router.get('/by-course/:courseId', auth, async (req, res, next) => {
  *         description: Insufficient permissions
  *       404:
  *         description: Lesson not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  *       503:
  *         description: Database not available
  */
-/**
- * @swagger
- * /lessons/{lessonId}/generate-ai:
- *   post:
- *     summary: Generate AI summary and quiz for a lesson
- *     description: >
- *       Uses Anthropic Claude to generate a 3-paragraph summary and a 5-question MCQ quiz from the lesson content,
- *       persists the results to the lesson record (aiSummary, aiQuizJson), and returns the generated fields.
- *     tags: [AI]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: lessonId
- *         required: true
- *         schema:
- *           type: integer
- *           format: int32
- *         description: Relational lesson id
- *     responses:
- *       200:
- *         description: AI content generated and saved
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/GenerateAiResponse'
- *       400:
- *         description: Invalid lessonId
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       401:
- *         description: Missing or invalid token
- *       403:
- *         description: Insufficient permissions
- *       404:
- *         description: Lesson not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       503:
- *         description: Database not available (or AI not configured)
- */
-=======
-/**
- * @swagger
- * /api/lessons/{lessonId}/generate-ai:
- *   post:
- *     summary: Generate AI summary and quiz for a lesson (alias)
- *     description: Alias for `/lessons/{lessonId}/generate-ai` to support `/api/*` base path.
- *     tags: [AI]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: lessonId
- *         required: true
- *         schema:
- *           type: integer
- *           format: int32
- *     responses:
- *       200:
- *         description: AI content generated and saved
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/GenerateAiResponse'
- */
- *     parameters:
- *       - in: path
- *         name: lessonId
- *         required: true
- *         schema:
- *           type: integer
- *           format: int32
- *         description: Relational lesson id
- *     responses:
- *       200:
- *         description: AI content generated and saved
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/GenerateAiResponse'
- *       400:
- *         description: Invalid lessonId
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       401:
- *         description: Missing or invalid token
- *       403:
- *         description: Insufficient permissions
- *       404:
- *         description: Lesson not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       503:
- *         description: Database not available (or AI not configured)
- */
-+router.post('/:lessonId/generate-ai', auth, rbac(WRITE_ROLES), async (req, res, next) => {
-+  try {
-+    const ds = getDataSource();
-+    if (!ds || !ds.isInitialized) {
-+      return res.status(503).json({ message: 'Database not available' });
-+    }
-+
-+    const { lessonId } = req.params;
-+    if (!isValidId(lessonId)) {
-+      return res.status(400).json({ message: 'Invalid lessonId' });
-+    }
-+
-+    const id = Number(lessonId);
-+
-+    const result = await ds.transaction(async (manager) => {
-+      const lessonRepo = manager.getRepository('Lesson');
-+
-+      const lesson = await lessonRepo.findOne({
-+        where: { id, deletedAt: null },
-+        select: {
-+          id: true,
-+          content: true,
-+          aiSummary: true,
-+          aiQuizJson: true,
-+        },
-+      });
-+
-+      if (!lesson) {
-+        const err = new Error('Lesson not found');
-+        err.statusCode = 404;
-+        throw err;
-+      }
-+
-+      const ai = createAIService();
-+      const [aiSummary, aiQuizJson] = await Promise.all([
-+        ai.generateSummary(lesson.content || ''),
-+        ai.generateQuiz(lesson.content || ''),
-+      ]);
-+
-+      // Persist results
-+      lesson.aiSummary = aiSummary || null;
-+      lesson.aiQuizJson = aiQuizJson || null;
-+      await lessonRepo.save(lesson);
-+
-+      return {
-+        lessonId: lesson.id,
-+        aiSummary: lesson.aiSummary,
-+        aiQuizJson: lesson.aiQuizJson,
-+      };
-+    });
-+
-+    return res.status(200).json(result);
-+  } catch (err) {
-+    if (err && err.code === 'ANTHROPIC_API_KEY_MISSING') {
-+      return res.status(503).json({ message: 'AI service not configured (missing ANTHROPIC_API_KEY)' });
-+    }
-+    if (err && err.code && String(err.code).startsWith('AI_OUTPUT_')) {
-+      return res.status(502).json({ message: err.message });
-+    }
-+    if (err && err.code === 'AI_INPUT_INVALID') {
-+      return res.status(400).json({ message: err.message });
-+    }
-+    if (err && err.statusCode) {
-+      return res.status(err.statusCode).json({ message: err.message });
-+    }
-+    return next(err);
-+  }
-+});
-+
 router.get('/:lessonId', auth, async (req, res, next) => {
   try {
     const ds = getDataSource();
@@ -1227,7 +1250,6 @@ router.patch('/:lessonId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
           throw err;
         }
 
-        // If order is also set (or stays the same), best-effort uniqueness within course.
         const orderToUse =
           updates.order !== undefined ? updates.order : Number.isFinite(Number(existing.order)) ? existing.order : 0;
 
@@ -1245,7 +1267,7 @@ router.patch('/:lessonId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
         existing.course = { id: targetCourseId };
       }
 
-      // If order is being changed without courseId change, still best-effort prevent duplicates within same course.
+      // If order is being changed without courseId change, best-effort prevent duplicates within same course.
       if (updates.order !== undefined && updates.courseId === undefined) {
         const orderToUse = updates.order;
         const courseIdToUse = existing.course?.id ? Number(existing.course.id) : existing.courseId;
@@ -1279,10 +1301,11 @@ router.patch('/:lessonId', auth, rbac(WRITE_ROLES), async (req, res, next) => {
       if (updates.order !== undefined) existing.order = updates.order;
       if (updates.content !== undefined || updates.__appendToContent) existing.content = nextContent;
 
-      // IMPORTANT: do not allow direct mass assignment of unknown keys
+      if (updates.videoUrl !== undefined) existing.videoUrl = updates.videoUrl;
+      if (updates.duration !== undefined) existing.duration = updates.duration;
+
       await lessonRepo.save(existing);
 
-      // Re-hydrate with relations to compute courseId
       const hydrated = await lessonRepo.findOne({
         where: { id: existing.id, deletedAt: null },
         relations: { course: true },
