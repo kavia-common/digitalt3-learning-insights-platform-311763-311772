@@ -165,55 +165,86 @@ async function runSeeds() {
       role: 'learner',
     });
 
-    // Sample courses created by instructor
-    const course1 = await upsertCourse(courseRepo, {
-      title: 'Introduction to Cybersecurity',
-      description: 'Learn core security concepts, threats, and best practices.',
+    // Production sample DigitalT3 courses (requested)
+    const courseAiEthics = await upsertCourse(courseRepo, {
+      title: 'AI Ethics',
+      description:
+        'Responsible AI fundamentals: fairness, transparency, privacy, safety, and human oversight for enterprise deployments.',
       status: 'published',
-      tags: ['security', 'fundamentals'],
+      tags: ['ai', 'ethics', 'governance'],
       createdById: instructor.id,
     });
 
-    const course2 = await upsertCourse(courseRepo, {
-      title: 'Secure Coding Basics',
-      description: 'Practical secure coding habits to reduce vulnerabilities in web apps.',
+    const coursePromptEng = await upsertCourse(courseRepo, {
+      title: 'Prompt Engineering 101',
+      description:
+        'Learn prompt patterns, evaluation techniques, and guardrails to get reliable results from LLMs in business workflows.',
+      status: 'published',
+      tags: ['ai', 'llm', 'prompting'],
+      createdById: instructor.id,
+    });
+
+    const courseCloudBasics = await upsertCourse(courseRepo, {
+      title: 'Cloud Basics',
+      description:
+        'Core cloud concepts: regions/zones, IAM, networking, storage, and reliability basics for modern enterprise systems.',
       status: 'draft',
-      tags: ['security', 'development', 'owasp'],
+      tags: ['cloud', 'fundamentals', 'security'],
       createdById: instructor.id,
     });
 
-    // Sample lessons (linked properly)
+    // Sample lessons (linked properly) — keep small but meaningful for frontend demos
     await upsertLesson(lessonRepo, {
-      courseId: course1.id,
+      courseId: courseAiEthics.id,
       order: 1,
-      title: 'Threat Modeling Basics',
+      title: 'Why AI Ethics Matters',
       content:
-        'Threat modeling helps identify risks early. Learn common threat categories and simple mitigations.',
+        'Understand common ethical risks (bias, misuse, privacy harms) and why enterprise AI programs require governance.',
       status: 'published',
     });
 
     await upsertLesson(lessonRepo, {
-      courseId: course1.id,
+      courseId: courseAiEthics.id,
       order: 2,
-      title: 'Authentication & Authorization',
+      title: 'Bias, Fairness, and Evaluation',
       content:
-        'Understand the difference between authentication and authorization, and how to implement them safely.',
+        'Learn how bias can emerge in data and models, and how to think about fairness tradeoffs and measurement.',
       status: 'published',
     });
 
     await upsertLesson(lessonRepo, {
-      courseId: course2.id,
+      courseId: coursePromptEng.id,
       order: 1,
-      title: 'Input Validation & Output Encoding',
+      title: 'Prompt Patterns',
       content:
-        'Validate inputs, encode outputs. Cover SQLi, XSS, and safe patterns to prevent injection bugs.',
+        'Explore core prompt patterns like role prompting, few-shot examples, and constraints to improve LLM output quality.',
+      status: 'published',
+    });
+
+    await upsertLesson(lessonRepo, {
+      courseId: coursePromptEng.id,
+      order: 2,
+      title: 'Prompt Evaluation & Iteration',
+      content:
+        'Build a simple evaluation loop: define success criteria, test cases, and iterate prompts for reliability.',
+      status: 'published',
+    });
+
+    await upsertLesson(lessonRepo, {
+      courseId: courseCloudBasics.id,
+      order: 1,
+      title: 'Cloud Shared Responsibility',
+      content:
+        'Clarify what the cloud provider secures vs. what your organization must secure (identity, config, data, apps).',
       status: 'draft',
     });
 
     // Minimal log (no secrets)
     console.log('Seed completed.');
     console.log(`Users: admin=${admin.email}, instructor=${instructor.email}, learner=${learner.email}`);
-    console.log(`Courses: ${course1.title} (id=${course1.id}), ${course2.title} (id=${course2.id})`);
+    console.log(
+      `Courses: ${courseAiEthics.title} (id=${courseAiEthics.id}), ${coursePromptEng.title} (id=${coursePromptEng.id}), ${courseCloudBasics.title} (id=${courseCloudBasics.id})`
+    );
     console.log('Note: passwords can be overridden via SEED_* env vars.');
   } finally {
     await ds.destroy();
