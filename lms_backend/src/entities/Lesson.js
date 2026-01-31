@@ -20,6 +20,21 @@ const LessonEntity = new EntitySchema({
       nullable: false,
       default: '',
     },
+
+    /**
+     * AI generated fields (persisted):
+     * - aiSummary: concise 3-paragraph summary (stored in MySQL TEXT)
+     * - aiQuizJson: JSON array of 5 MCQs
+     */
+    aiSummary: {
+      type: 'text',
+      nullable: true,
+    },
+    aiQuizJson: {
+      type: 'json',
+      nullable: true,
+    },
+
     order: {
       // Keep name "order" for API compatibility; works in MySQL but is a reserved word in SQL.
       // TypeORM will quote it as needed.

@@ -77,8 +77,13 @@ app.use('/docs', swaggerUi.serve, swaggerUiMiddleware);
 // Parse JSON request body
 app.use(express.json());
 
-// Mount routes
+/**
+ * Mount routes:
+ * - Root (existing): /auth, /courses, /lessons, etc.
+ * - Alias (requested): /api/* -> same routes to provide /api/lessons/:id/generate-ai
+ */
 app.use('/', routes);
+app.use('/api', routes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

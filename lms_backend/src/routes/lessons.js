@@ -3,6 +3,7 @@ const express = require('express');
 const auth = require('../middleware/auth');
 const rbac = require('../middleware/rbac');
 const { getDataSource } = require('../config/db');
+const { createAIService } = require('../services/ai');
 
 const router = express.Router();
 
@@ -50,6 +51,17 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  *         content:
  *           type: string
  *           example: Lesson content (markdown or HTML)...
+ *         aiSummary:
+ *           type: string
+ *           nullable: true
+ *           description: AI-generated 3-paragraph lesson summary
+ *           example: "Paragraph 1...\n\nParagraph 2...\n\nParagraph 3..."
+ *         aiQuizJson:
+ *           type: array
+ *           nullable: true
+ *           description: AI-generated quiz questions (5 MCQs)
+ *           items:
+ *             $ref: '#/components/schemas/LessonQuizQuestion'
  *         order:
  *           type: integer
  *           example: 1
@@ -165,6 +177,36 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  *           type: integer
  *           format: int32
  *           example: 3
+ *     LessonQuizQuestion:
+ *       type: object
+ *       required: [question, options, correctAnswer]
+ *       properties:
+ *         question:
+ *           type: string
+ *           example: What is threat modeling primarily used for?
+ *         options:
+ *           type: array
+ *           items:
+ *             type: string
+ *           example: ["Identify threats early", "Encrypt all data", "Write unit tests", "Deploy faster"]
+ *         correctAnswer:
+ *           type: string
+ *           example: Identify threats early
+ *     GenerateAiResponse:
+ *       type: object
+ *       properties:
+ *         lessonId:
+ *           type: integer
+ *           format: int32
+ *           example: 101
+ *         aiSummary:
+ *           type: string
+ *           nullable: true
+ *         aiQuizJson:
+ *           type: array
+ *           nullable: true
+ *           items:
+ *             $ref: '#/components/schemas/LessonQuizQuestion'
  */
 
 function isValidId(raw) {
@@ -228,6 +270,8 @@ function toLessonResponse(lesson) {
         : undefined,
     title: lesson.title,
     content: lesson.content,
+    aiSummary: lesson.aiSummary ?? null,
+    aiQuizJson: lesson.aiQuizJson ?? null,
     order: lesson.order,
     status: lesson.status,
     createdAt: lesson.createdAt,
@@ -933,6 +977,179 @@ router.get('/by-course/:courseId', auth, async (req, res, next) => {
  *       503:
  *         description: Database not available
  */
+/**
+ * @swagger
+ * /lessons/{lessonId}/generate-ai:
+ *   post:
+ *     summary: Generate AI summary and quiz for a lesson
+ *     description: >
+ *       Uses Anthropic Claude to generate a 3-paragraph summary and a 5-question MCQ quiz from the lesson content,
+ *       persists the results to the lesson record (aiSummary, aiQuizJson), and returns the generated fields.
+ *     tags: [AI]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational lesson id
+ *     responses:
+ *       200:
+ *         description: AI content generated and saved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GenerateAiResponse'
+ *       400:
+ *         description: Invalid lessonId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
+ *       404:
+ *         description: Lesson not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       503:
+ *         description: Database not available (or AI not configured)
+ */
+=======
+/**
+ * @swagger
+ * /api/lessons/{lessonId}/generate-ai:
+ *   post:
+ *     summary: Generate AI summary and quiz for a lesson (alias)
+ *     description: Alias for `/lessons/{lessonId}/generate-ai` to support `/api/*` base path.
+ *     tags: [AI]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *     responses:
+ *       200:
+ *         description: AI content generated and saved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GenerateAiResponse'
+ */
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *         description: Relational lesson id
+ *     responses:
+ *       200:
+ *         description: AI content generated and saved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GenerateAiResponse'
+ *       400:
+ *         description: Invalid lessonId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       403:
+ *         description: Insufficient permissions
+ *       404:
+ *         description: Lesson not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       503:
+ *         description: Database not available (or AI not configured)
+ */
++router.post('/:lessonId/generate-ai', auth, rbac(WRITE_ROLES), async (req, res, next) => {
++  try {
++    const ds = getDataSource();
++    if (!ds || !ds.isInitialized) {
++      return res.status(503).json({ message: 'Database not available' });
++    }
++
++    const { lessonId } = req.params;
++    if (!isValidId(lessonId)) {
++      return res.status(400).json({ message: 'Invalid lessonId' });
++    }
++
++    const id = Number(lessonId);
++
++    const result = await ds.transaction(async (manager) => {
++      const lessonRepo = manager.getRepository('Lesson');
++
++      const lesson = await lessonRepo.findOne({
++        where: { id, deletedAt: null },
++        select: {
++          id: true,
++          content: true,
++          aiSummary: true,
++          aiQuizJson: true,
++        },
++      });
++
++      if (!lesson) {
++        const err = new Error('Lesson not found');
++        err.statusCode = 404;
++        throw err;
++      }
++
++      const ai = createAIService();
++      const [aiSummary, aiQuizJson] = await Promise.all([
++        ai.generateSummary(lesson.content || ''),
++        ai.generateQuiz(lesson.content || ''),
++      ]);
++
++      // Persist results
++      lesson.aiSummary = aiSummary || null;
++      lesson.aiQuizJson = aiQuizJson || null;
++      await lessonRepo.save(lesson);
++
++      return {
++        lessonId: lesson.id,
++        aiSummary: lesson.aiSummary,
++        aiQuizJson: lesson.aiQuizJson,
++      };
++    });
++
++    return res.status(200).json(result);
++  } catch (err) {
++    if (err && err.code === 'ANTHROPIC_API_KEY_MISSING') {
++      return res.status(503).json({ message: 'AI service not configured (missing ANTHROPIC_API_KEY)' });
++    }
++    if (err && err.code && String(err.code).startsWith('AI_OUTPUT_')) {
++      return res.status(502).json({ message: err.message });
++    }
++    if (err && err.code === 'AI_INPUT_INVALID') {
++      return res.status(400).json({ message: err.message });
++    }
++    if (err && err.statusCode) {
++      return res.status(err.statusCode).json({ message: err.message });
++    }
++    return next(err);
++  }
++});
++
 router.get('/:lessonId', auth, async (req, res, next) => {
   try {
     const ds = getDataSource();

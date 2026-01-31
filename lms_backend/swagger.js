@@ -14,6 +14,7 @@ const options = {
       { name: 'Auth', description: 'Authentication and identity endpoints' },
       { name: 'Courses', description: 'Course management endpoints' },
       { name: 'Lessons', description: 'Lesson management endpoints' },
+      { name: 'AI', description: 'AI-assisted generation endpoints (Claude)' },
     ],
     components: {
       securitySchemes: {
