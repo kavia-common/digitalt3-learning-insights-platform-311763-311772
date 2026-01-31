@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 const { DataSource } = require('typeorm');
 
 /**
@@ -19,6 +20,48 @@ function parseIntEnv(value, fallback) {
  */
 function describeTarget(target) {
   return `${target.host}:${target.port}/${target.database}`;
+}
+
+/**
+ * Build AWS RDS-compatible TLS options for mysql2.
+ *
+ * Behavior:
+ * - Looks for an RDS CA bundle file named `global-bundle.pem` at the backend root
+ *   (same folder as package.json), or via DB_SSL_CA_PATH.
+ * - Sets rejectUnauthorized=false as required for this environment.
+ *
+ * @returns {false|{ca?: string, rejectUnauthorized: boolean}}
+ */
+function buildMySqlSslOptionsFromEnv() {
+  const sslEnabledRaw = process.env.DB_SSL || process.env.DB_SSL_ENABLED;
+  const sslEnabled =
+    sslEnabledRaw === undefined || sslEnabledRaw === null
+      ? true // default ON for production RDS safety; can be disabled by setting DB_SSL=false
+      : !['false', '0', 'no'].includes(String(sslEnabledRaw).toLowerCase());
+
+  if (!sslEnabled) {
+    return false;
+  }
+
+  const caPathFromEnv = process.env.DB_SSL_CA_PATH;
+  const defaultCaPath = path.join(process.cwd(), 'global-bundle.pem');
+  const caPath = caPathFromEnv && String(caPathFromEnv).trim().length > 0 ? String(caPathFromEnv).trim() : defaultCaPath;
+
+  let ca;
+  try {
+    if (fs.existsSync(caPath)) {
+      ca = fs.readFileSync(caPath, 'utf8');
+    }
+  } catch {
+    // If we can't read CA for any reason, fall back to no explicit CA.
+    // We still keep rejectUnauthorized=false as requested.
+    ca = undefined;
+  }
+
+  return {
+    ...(ca ? { ca } : {}),
+    rejectUnauthorized: false,
+  };
 }
 
 /**
@@ -47,6 +90,8 @@ function buildMySqlDataSourceOptionsFromEnv() {
 
   const migrationsDir = path.join(__dirname, '..', 'migrations');
 
+  const ssl = buildMySqlSslOptionsFromEnv();
+
   return {
     type: 'mysql',
     host,
@@ -54,6 +99,12 @@ function buildMySqlDataSourceOptionsFromEnv() {
     username,
     password,
     database,
+
+    /**
+     * AWS RDS SSL/TLS.
+     * TypeORM passes this through to mysql2 as `ssl`.
+     */
+    ssl,
 
     // TypeORM entities (replacing Mongoose models).
     entities: [

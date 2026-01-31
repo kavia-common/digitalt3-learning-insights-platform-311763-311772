@@ -11,11 +11,21 @@ class HealthService {
     // This endpoint must never crash startup.
     let connected = false;
     let dbError;
+    let dbVersion;
 
     try {
       if (ds && ds.isInitialized) {
         // Simple, safe ping. No secrets logged or returned.
         await ds.query('SELECT 1');
+
+        // Verification requested for production RDS: read server version.
+        // mysql2 returns rows as an array of objects.
+        const rows = await ds.query('SELECT VERSION() AS version');
+        dbVersion =
+          Array.isArray(rows) && rows.length > 0 && rows[0] && typeof rows[0] === 'object'
+            ? rows[0].version || rows[0]['VERSION()'] || undefined
+            : undefined;
+
         connected = true;
       } else {
         connected = false;
@@ -39,6 +49,7 @@ class HealthService {
         connected,
         type: 'mysql',
         dbName: dbName || undefined,
+        ...(dbVersion ? { version: dbVersion } : {}),
         ...(dbError ? { error: dbError } : {}),
       },
       auth: {
