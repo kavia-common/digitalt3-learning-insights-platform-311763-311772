@@ -3,7 +3,7 @@ require('dotenv').config();
 const app = require('./app');
 const { initializeDataSource, getConfiguredDbName } = require('./config/db');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || '0.0.0.0';
 
 async function start() {
@@ -38,7 +38,9 @@ async function start() {
   }
 
   const server = app.listen(PORT, HOST, () => {
-    console.log(`Server running at http://${HOST}:${PORT}`);
+    console.log(`Server listening on http://${HOST}:${PORT}`);
+    // Helpful for local dev convenience; binding is still controlled by HOST above.
+    console.log(`Local access (if applicable): http://localhost:${PORT}`);
   });
 
   // Graceful shutdown

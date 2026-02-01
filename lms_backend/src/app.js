@@ -78,6 +78,12 @@ app.use('/docs', swaggerUi.serve, swaggerUiMiddleware);
 app.use(express.json());
 
 /**
+ * Simple preview healthcheck endpoint.
+ * Keeps behavior minimal and stable for infrastructure checks.
+ */
+app.get('/api/health', (req, res) => res.status(200).json({ status: 'ok' }));
+
+/**
  * Mount routes:
  * - Root (existing): /auth, /courses, /lessons, etc.
  * - Alias (requested): /api/* -> same routes to provide /api/lessons/:id/generate-ai
