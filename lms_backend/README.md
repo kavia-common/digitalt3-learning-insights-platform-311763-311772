@@ -1,14 +1,39 @@
-# LMS Backend (Express + TypeORM + MySQL)
+# LMS Backend (Express + TypeORM)
 
-This backend uses TypeORM with MySQL (e.g., AWS RDS). **Do not rely on `synchronize` in production**; use migrations.
+This backend uses TypeORM and supports multiple DB providers via an environment flag.
+
+## DB provider selection (rollback-safe)
+
+Set `DB_PROVIDER` to choose the DB engine:
+
+- `mysql` (default): current behavior (uses `DB_*` vars below)
+- `aws_rds_postgres` (alias: `postgres`): AWS RDS Postgres support (uses `PG_*` vars below)
+- `disabled`: start API without DB connectivity (useful for preview)
+
+If `DB_PROVIDER` is not set, the backend defaults to **MySQL** and will continue to work as before.
 
 ## Required environment variables
 
+### MySQL (default)
+
+- `DB_PROVIDER=mysql` (optional; default)
 - `DB_HOST`
 - `DB_PORT` (optional; defaults to `3306`)
 - `DB_USERNAME`
 - `DB_PASSWORD`
 - `DEFAULT_DB`
+
+### AWS RDS Postgres (optional)
+
+- `DB_PROVIDER=aws_rds_postgres` (or `postgres`)
+- `PG_HOST`
+- `PG_PORT` (optional; defaults to `5432`)
+- `PG_USERNAME`
+- `PG_PASSWORD`
+- `PG_DATABASE`
+
+### Auth
+
 - `JWT_SECRET` (for auth endpoints)
 
 ## Migrations

@@ -3,6 +3,19 @@ const fs = require('fs');
 const { DataSource } = require('typeorm');
 
 /**
+ * Supported DB providers.
+ * - mysql: current/default provider (backwards compatible)
+ * - aws_rds_postgres: intended AWS RDS Postgres option (also accepts postgres)
+ * - disabled: do not configure any DB (useful for preview without DB)
+ */
+const DB_PROVIDERS = {
+  MYSQL: 'mysql',
+  AWS_RDS_POSTGRES: 'aws_rds_postgres',
+  POSTGRES: 'postgres', // alias
+  DISABLED: 'disabled',
+};
+
+/**
  * Small helper to parse an integer env var safely.
  * @param {string|undefined} value
  * @param {number} fallback
@@ -11,6 +24,17 @@ const { DataSource } = require('typeorm');
 function parseIntEnv(value, fallback) {
   const n = Number.parseInt(String(value || ''), 10);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Returns the normalized DB provider from env.
+ * @returns {'mysql'|'aws_rds_postgres'|'disabled'}
+ */
+function getDbProvider() {
+  const raw = (process.env.DB_PROVIDER || DB_PROVIDERS.MYSQL).toLowerCase().trim();
+  if (raw === DB_PROVIDERS.DISABLED) return DB_PROVIDERS.DISABLED;
+  if (raw === DB_PROVIDERS.AWS_RDS_POSTGRES || raw === DB_PROVIDERS.POSTGRES) return DB_PROVIDERS.AWS_RDS_POSTGRES;
+  return DB_PROVIDERS.MYSQL;
 }
 
 /**
@@ -106,35 +130,118 @@ function buildMySqlDataSourceOptionsFromEnv() {
      */
     ssl,
 
-    // TypeORM entities (replacing Mongoose models).
+    // TypeORM entities.
     entities: [
       require('../entities/User').UserEntity,
       require('../entities/Course').CourseEntity,
       require('../entities/Lesson').LessonEntity,
     ],
 
-    // TypeORM migrations (JS files). These are executed via scripts in package.json.
     migrations: [path.join(migrationsDir, '*.js')],
 
-    /**
-     * IMPORTANT:
-     * - Do not rely on synchronize for production.
-     * - Default to false unless TYPEORM_SYNC=true is explicitly set.
-     */
     synchronize: process.env.TYPEORM_SYNC === 'true',
-
-    /**
-     * migrationsRun is intentionally false: we run migrations explicitly (CI / deploy step)
-     * using npm scripts so it's predictable and safe.
-     */
     migrationsRun: false,
+    logging: false,
+  };
+}
 
-    // Keep logs low-noise; can be adjusted later.
+/**
+ * Build AWS RDS Postgres-compatible TLS options.
+ *
+ * Notes:
+ * - For AWS RDS, `rejectUnauthorized` is commonly left true when CA bundle is provided.
+ * - We keep behavior similar to existing MySQL setup: allow `rejectUnauthorized=false`
+ *   (configurable via DB_SSL_REJECT_UNAUTHORIZED).
+ *
+ * @returns {false|{ca?: string, rejectUnauthorized?: boolean}}
+ */
+function buildPostgresSslOptionsFromEnv() {
+  const sslEnabledRaw = process.env.DB_SSL || process.env.DB_SSL_ENABLED;
+  const sslEnabled =
+    sslEnabledRaw === undefined || sslEnabledRaw === null
+      ? true
+      : !['false', '0', 'no'].includes(String(sslEnabledRaw).toLowerCase());
+
+  if (!sslEnabled) {
+    return false;
+  }
+
+  const rejectUnauthorizedRaw = process.env.DB_SSL_REJECT_UNAUTHORIZED;
+  const rejectUnauthorized =
+    rejectUnauthorizedRaw === undefined || rejectUnauthorizedRaw === null
+      ? false
+      : !['false', '0', 'no'].includes(String(rejectUnauthorizedRaw).toLowerCase());
+
+  const caPathFromEnv = process.env.DB_SSL_CA_PATH;
+  const defaultCaPath = path.join(process.cwd(), 'global-bundle.pem');
+  const caPath = caPathFromEnv && String(caPathFromEnv).trim().length > 0 ? String(caPathFromEnv).trim() : defaultCaPath;
+
+  let ca;
+  try {
+    if (fs.existsSync(caPath)) {
+      ca = fs.readFileSync(caPath, 'utf8');
+    }
+  } catch {
+    ca = undefined;
+  }
+
+  return {
+    ...(ca ? { ca } : {}),
+    rejectUnauthorized,
+  };
+}
+
+/**
+ * Build Postgres DataSource config from env vars.
+ * Required: PG_HOST, PG_USERNAME, PG_PASSWORD, PG_DATABASE
+ * Optional: PG_PORT (default 5432)
+ */
+function buildPostgresDataSourceOptionsFromEnv() {
+  const host = process.env.PG_HOST;
+  const port = parseIntEnv(process.env.PG_PORT, 5432);
+  const username = process.env.PG_USERNAME;
+  const password = process.env.PG_PASSWORD;
+  const database = process.env.PG_DATABASE;
+
+  const missing = [];
+  if (!host) missing.push('PG_HOST');
+  if (!username) missing.push('PG_USERNAME');
+  if (!password) missing.push('PG_PASSWORD');
+  if (!database) missing.push('PG_DATABASE');
+
+  if (missing.length > 0) {
+    const err = new Error(`Postgres env vars missing: ${missing.join(', ')}`);
+    err.code = 'POSTGRES_ENV_MISSING';
+    throw err;
+  }
+
+  const migrationsDir = path.join(__dirname, '..', 'migrations');
+  const ssl = buildPostgresSslOptionsFromEnv();
+
+  return {
+    type: 'postgres',
+    host,
+    port,
+    username,
+    password,
+    database,
+    ssl,
+
+    entities: [
+      require('../entities/User').UserEntity,
+      require('../entities/Course').CourseEntity,
+      require('../entities/Lesson').LessonEntity,
+    ],
+    migrations: [path.join(migrationsDir, '*.js')],
+
+    synchronize: process.env.TYPEORM_SYNC === 'true',
+    migrationsRun: false,
     logging: false,
   };
 }
 
 let appDataSource = null;
+let configuredDbMeta = null;
 
 /**
  * When multiple requests (or startup + request) race to initialize the DataSource,
@@ -149,45 +256,75 @@ function getDataSource() {
 }
 
 // PUBLIC_INTERFACE
+function getDbMeta() {
+  /** Returns non-secret metadata about the configured DB (provider/type/name). */
+  return configuredDbMeta;
+}
+
+// PUBLIC_INTERFACE
 function createDataSourceFromEnv() {
   /** Creates a non-initialized TypeORM DataSource using environment variables. */
-  const options = buildMySqlDataSourceOptionsFromEnv();
+  const provider = getDbProvider();
+
+  if (provider === DB_PROVIDERS.DISABLED) {
+    const err = new Error('Database provider disabled via DB_PROVIDER=disabled');
+    err.code = 'DB_DISABLED';
+    throw err;
+  }
+
+  const options = provider === DB_PROVIDERS.AWS_RDS_POSTGRES ? buildPostgresDataSourceOptionsFromEnv() : buildMySqlDataSourceOptionsFromEnv();
   return new DataSource(options);
 }
 
 // PUBLIC_INTERFACE
 async function initializeDataSource() {
   /**
-   * Initializes TypeORM DataSource (MySQL) using environment variables.
-   * Returns the DataSource instance.
+   * Initializes TypeORM DataSource using environment variables.
+   * Provider selected via DB_PROVIDER:
+   * - mysql (default)
+   * - aws_rds_postgres (alias: postgres)
+   * - disabled
    */
+  const provider = getDbProvider();
+
+  if (provider === DB_PROVIDERS.DISABLED) {
+    const err = new Error('Database provider disabled via DB_PROVIDER=disabled');
+    err.code = 'DB_DISABLED';
+    throw err;
+  }
+
   if (appDataSource && appDataSource.isInitialized) {
     return appDataSource;
   }
 
-  // Single-flight: if init is already in progress, await it.
   if (initializationPromise) {
     return initializationPromise;
   }
 
   initializationPromise = (async () => {
-    const options = buildMySqlDataSourceOptionsFromEnv();
+    const options = provider === DB_PROVIDERS.AWS_RDS_POSTGRES ? buildPostgresDataSourceOptionsFromEnv() : buildMySqlDataSourceOptionsFromEnv();
     const target = { host: options.host, port: options.port, database: options.database };
 
-    // Safe log: no secrets.
-    console.log(`MySQL configuring connection target: ${describeTarget(target)}`);
+    configuredDbMeta = {
+      provider,
+      type: options.type,
+      database: options.database,
+      host: options.host,
+      port: options.port,
+    };
+
+    console.log(`${options.type} configuring connection target: ${describeTarget(target)}`);
 
     appDataSource = new DataSource(options);
     await appDataSource.initialize();
 
-    console.log(`MySQL connected: ${describeTarget(target)}`);
+    console.log(`${options.type} connected: ${describeTarget(target)}`);
     return appDataSource;
   })();
 
   try {
     return await initializationPromise;
   } finally {
-    // If initialization failed, allow retry later (e.g., DB comes up after preview starts).
     if (!appDataSource || !appDataSource.isInitialized) {
       initializationPromise = null;
     }
@@ -201,7 +338,6 @@ async function checkDatabaseConnectivity() {
     if (!appDataSource || !appDataSource.isInitialized) {
       return false;
     }
-    // MySQL ping via a trivial query.
     await appDataSource.query('SELECT 1');
     return true;
   } catch {
@@ -211,7 +347,11 @@ async function checkDatabaseConnectivity() {
 
 // PUBLIC_INTERFACE
 function getConfiguredDbName() {
-  /** Returns the configured MySQL database name, if known. */
+  /** Returns the configured database name (MySQL: DEFAULT_DB, Postgres: PG_DATABASE), if known. */
+  const provider = getDbProvider();
+  if (provider === DB_PROVIDERS.AWS_RDS_POSTGRES) {
+    return process.env.PG_DATABASE || null;
+  }
   return process.env.DEFAULT_DB || null;
 }
 
@@ -221,5 +361,6 @@ module.exports = {
   getConfiguredDbName,
   getDataSource,
   createDataSourceFromEnv,
+  getDbMeta,
 };
 
