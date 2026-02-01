@@ -1,13 +1,16 @@
 const Anthropic = require('@anthropic-ai/sdk');
 
-const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
+const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514';
 const DEFAULT_MAX_TOKENS = Number(process.env.ANTHROPIC_MAX_TOKENS || 1024);
+const DEFAULT_ANTHROPIC_VERSION = process.env.ANTHROPIC_VERSION || '2023-06-01';
 
 /**
- * Basic schema validation for quiz JSON coming back from the model.
- * We keep it permissive but ensure it is safe/consistent for downstream clients.
+ * Normalize and validate the quiz schema mandated by product requirements:
+ * - JSON array of exactly 5 questions
+ * - each question has: questionText (string), options (array of 4 strings), correctAnswerIndex (0..3)
+ *
  * @param {any} quiz
- * @returns {Array<{question: string, options: string[], correctAnswer: string}>|null}
+ * @returns {Array<{questionText: string, options: string[], correctAnswerIndex: number}>|null}
  */
 function normalizeQuiz(quiz) {
   if (!Array.isArray(quiz)) {
@@ -19,24 +22,26 @@ function normalizeQuiz(quiz) {
     if (!item || typeof item !== 'object') {
       return null;
     }
-    const question = typeof item.question === 'string' ? item.question.trim() : '';
+
+    const questionText = typeof item.questionText === 'string' ? item.questionText.trim() : '';
     const options = Array.isArray(item.options)
       ? item.options.map((o) => (typeof o === 'string' ? o.trim() : '')).filter(Boolean)
       : [];
-    const correctAnswer = typeof item.correctAnswer === 'string' ? item.correctAnswer.trim() : '';
 
-    if (!question || options.length < 2 || !correctAnswer) {
+    const idxRaw = item.correctAnswerIndex;
+    const correctAnswerIndex = Number.isFinite(Number(idxRaw)) ? Number(idxRaw) : NaN;
+
+    if (!questionText) {
+      return null;
+    }
+    if (options.length !== 4) {
+      return null;
+    }
+    if (!Number.isInteger(correctAnswerIndex) || correctAnswerIndex < 0 || correctAnswerIndex > 3) {
       return null;
     }
 
-    // If the model returns a correctAnswer that isn't in options, keep it but append
-    // to preserve correctness and avoid breaking clients.
-    const optionSet = new Set(options.map((o) => o.toLowerCase()));
-    if (!optionSet.has(correctAnswer.toLowerCase())) {
-      options.push(correctAnswer);
-    }
-
-    normalized.push({ question, options, correctAnswer });
+    normalized.push({ questionText, options, correctAnswerIndex });
   }
 
   return normalized;
@@ -52,7 +57,16 @@ class AIService {
       throw err;
     }
 
-    this.client = new Anthropic({ apiKey });
+    /**
+     * We configure the official SDK with required defaults:
+     * - anthropic-version header via SDK option `defaultHeaders`
+     */
+    this.client = new Anthropic({
+      apiKey,
+      defaultHeaders: {
+        'anthropic-version': DEFAULT_ANTHROPIC_VERSION,
+      },
+    });
   }
 
   // PUBLIC_INTERFACE
@@ -93,7 +107,7 @@ class AIService {
 
   // PUBLIC_INTERFACE
   async generateQuiz(content) {
-    /** Returns an array of 5 multiple choice questions in JSON format. */
+    /** Returns an array of 5 multiple choice questions in the mandated JSON schema. */
     const input = typeof content === 'string' ? content.trim() : '';
     if (!input) {
       const err = new Error('content is required');
@@ -101,28 +115,28 @@ class AIService {
       throw err;
     }
 
-    const prompt = [
-      'You are an assistant helping create quiz questions for an enterprise LMS.',
-      'From the lesson content below, create exactly 5 multiple choice questions.',
-      'Return ONLY valid JSON, with this exact shape:',
-      '[',
-      '  { "question": "...", "options": ["A", "B", "C", "D"], "correctAnswer": "..." },',
-      '  ... (5 total)',
-      ']',
-      'Rules:',
-      '- options must be an array of 4 strings',
-      '- correctAnswer must be exactly one of the options',
-      '- keep questions unambiguous and based strictly on the lesson content',
-      '',
-      'LESSON CONTENT:',
-      input,
+    // Mandated: use a system prompt that requires the JSON schema.
+    const systemPrompt = [
+      'You are an enterprise LMS quiz generator.',
+      'You MUST respond with ONLY a valid JSON array (no markdown, no code fences, no commentary).',
+      'The JSON array MUST contain exactly 5 objects.',
+      'Each object MUST have exactly these fields:',
+      '- questionText: string',
+      '- options: array of exactly 4 strings',
+      '- correctAnswerIndex: integer 0-3 (index into options)',
+      'Do not include any other keys.',
+      'Questions MUST be based strictly on the lesson content.',
+      'Options MUST be plausible and non-overlapping.',
     ].join('\n');
+
+    const userPrompt = ['LESSON CONTENT:', input].join('\n');
 
     const msg = await this.client.messages.create({
       model: DEFAULT_MODEL,
       max_tokens: DEFAULT_MAX_TOKENS,
       temperature: 0.2,
-      messages: [{ role: 'user', content: prompt }],
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
     });
 
     const text = Array.isArray(msg.content)
@@ -140,7 +154,13 @@ class AIService {
       const start = text.indexOf('[');
       const end = text.lastIndexOf(']');
       if (start >= 0 && end > start) {
-        parsed = JSON.parse(text.slice(start, end + 1));
+        try {
+          parsed = JSON.parse(text.slice(start, end + 1));
+        } catch (err) {
+          const e = new Error('AI quiz response was not valid JSON');
+          e.code = 'AI_OUTPUT_INVALID_JSON';
+          throw e;
+        }
       } else {
         const err = new Error('AI quiz response was not valid JSON');
         err.code = 'AI_OUTPUT_INVALID_JSON';

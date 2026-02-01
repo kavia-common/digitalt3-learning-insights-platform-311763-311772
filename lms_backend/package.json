@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "test": "jest",
     "lint": "eslint .",
+    "verify:ai": "node scripts/verify-ai.js",
     "db:migrate": "node ./node_modules/typeorm/cli.js -d ./src/typeorm-datasource.js migration:run",
     "db:migrate:revert": "node ./node_modules/typeorm/cli.js -d ./src/typeorm-datasource.js migration:revert",
     "db:migrate:show": "node ./node_modules/typeorm/cli.js -d ./src/typeorm-datasource.js migration:show",

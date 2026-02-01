@@ -192,19 +192,23 @@ const SORT_ORDERS = ['ASC', 'DESC'];
  *           example: 3
  *     LessonQuizQuestion:
  *       type: object
- *       required: [question, options, correctAnswer]
+ *       required: [questionText, options, correctAnswerIndex]
  *       properties:
- *         question:
+ *         questionText:
  *           type: string
  *           example: What is threat modeling primarily used for?
  *         options:
  *           type: array
+ *           minItems: 4
+ *           maxItems: 4
  *           items:
  *             type: string
  *           example: ["Identify threats early", "Encrypt all data", "Write unit tests", "Deploy faster"]
- *         correctAnswer:
- *           type: string
- *           example: Identify threats early
+ *         correctAnswerIndex:
+ *           type: integer
+ *           minimum: 0
+ *           maximum: 3
+ *           example: 0
  *     GenerateAiResponse:
  *       type: object
  *       properties:
