@@ -15,6 +15,63 @@ const SORT_FIELDS = ['createdAt', 'updatedAt', 'title', 'order'];
 const SORT_ORDERS = ['ASC', 'DESC'];
 
 /**
+ * Helper: normalize quiz stored in DB (may be null, JSON, or stringified JSON depending on MySQL driver).
+ * @param {any} raw
+ * @returns {Array<{questionText: string, options: string[], correctAnswerIndex: number}>|null}
+ */
+function normalizeStoredQuiz(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Helper: compute quiz score as percentage 0..100.
+ * @param {Array<{questionText: string, options: string[], correctAnswerIndex: number}>} quiz
+ * @param {Record<string, number>|Array<number>|undefined|null} answers
+ * @returns {{ correctCount: number, total: number, percentage: number }}
+ */
+function computeQuizScore(quiz, answers) {
+  const total = Array.isArray(quiz) ? quiz.length : 0;
+  if (!total) return { correctCount: 0, total: 0, percentage: 0 };
+
+  let correctCount = 0;
+
+  for (let i = 0; i < total; i += 1) {
+    const q = quiz[i];
+    const correct = Number.isFinite(Number(q?.correctAnswerIndex)) ? Number(q.correctAnswerIndex) : null;
+
+    let provided = null;
+    if (Array.isArray(answers)) {
+      provided = Number.isFinite(Number(answers[i])) ? Number(answers[i]) : null;
+    } else if (answers && typeof answers === 'object') {
+      // allow either numeric keys ("0") or ("1") etc - try both 0-based and 1-based
+      const v0 = answers[i] ?? answers[String(i)];
+      const v1 = answers[i + 1] ?? answers[String(i + 1)];
+      const raw = v0 !== undefined ? v0 : v1;
+      provided = Number.isFinite(Number(raw)) ? Number(raw) : null;
+    }
+
+    if (correct !== null && provided !== null && Number.isInteger(provided) && provided >= 0 && provided <= 3) {
+      if (provided === correct) correctCount += 1;
+    }
+  }
+
+  const percentage = Math.round((correctCount / total) * 10000) / 100; // 2 decimals
+  return { correctCount, total, percentage };
+}
+
+/**
  * @swagger
  * tags:
  *   - name: Lessons
@@ -698,6 +755,30 @@ router.post('/', auth, rbac(WRITE_ROLES), async (req, res, next) => {
       });
 
       const saved = await lessonRepo.save(lesson);
+
+      // AI Automation:
+      // If a transcript/content is present at creation time, auto-generate aiSummary + aiQuizJson and persist.
+      const contentForAi = typeof saved.content === 'string' ? saved.content.trim() : '';
+      if (contentForAi.length > 0) {
+        try {
+          const ai = createAIService();
+          const [aiSummary, aiQuizJson] = await Promise.all([
+            ai.generateSummary(contentForAi),
+            ai.generateQuiz(contentForAi),
+          ]);
+
+          saved.aiSummary = aiSummary || null;
+          saved.aiQuizJson = aiQuizJson || null;
+          await lessonRepo.save(saved);
+        } catch (aiErr) {
+          // Best-effort: lesson creation must succeed even if AI fails.
+          // Client can retry via POST /lessons/:id/generate-ai.
+          // Avoid logging secrets; keep minimal context.
+          // eslint-disable-next-line no-console
+          console.warn('AI auto-generation failed during lesson create:', aiErr?.code || aiErr?.message);
+        }
+      }
+
       return { saved, courseId: course.id };
     });
 
@@ -1062,6 +1143,258 @@ router.post('/:lessonId/generate-ai', auth, rbac(WRITE_ROLES), async (req, res, 
     if (err && err.code === 'AI_INPUT_INVALID') {
       return res.status(400).json({ message: err.message });
     }
+    if (err && err.statusCode) {
+      return res.status(err.statusCode).json({ message: err.message });
+    }
+    return next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /lessons/{lessonId}/content:
+ *   get:
+ *     summary: Get AI-generated lesson content (summary + quiz)
+ *     description: >
+ *       Returns the AI summary and quiz for a lesson in a clean JSON format. Requires authentication.
+ *       If aiSummary/aiQuizJson are missing, client can call POST /lessons/{lessonId}/generate-ai (admin/instructor).
+ *     tags: [Lessons]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *     responses:
+ *       200:
+ *         description: Lesson AI content
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 lessonId:
+ *                   type: integer
+ *                   format: int32
+ *                 aiSummary:
+ *                   type: string
+ *                   nullable: true
+ *                 aiQuizJson:
+ *                   type: array
+ *                   nullable: true
+ *                   items:
+ *                     $ref: '#/components/schemas/LessonQuizQuestion'
+ *       400:
+ *         description: Invalid lessonId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       404:
+ *         description: Lesson not found
+ *       503:
+ *         description: Database not available
+ */
+router.get('/:lessonId/content', auth, async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const { lessonId } = req.params;
+    if (!isValidId(lessonId)) {
+      return res.status(400).json({ message: 'Invalid lessonId' });
+    }
+
+    const id = Number(lessonId);
+    const lessonRepo = ds.getRepository('Lesson');
+
+    const lesson = await lessonRepo.findOne({
+      where: { id, deletedAt: null },
+      select: { id: true, aiSummary: true, aiQuizJson: true },
+    });
+
+    if (!lesson) {
+      return res.status(404).json({ message: 'Lesson not found' });
+    }
+
+    return res.status(200).json({
+      lessonId: lesson.id,
+      aiSummary: lesson.aiSummary ?? null,
+      aiQuizJson: normalizeStoredQuiz(lesson.aiQuizJson),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /lessons/{lessonId}/submit-quiz:
+ *   post:
+ *     summary: Submit quiz answers and update the current user's readiness score
+ *     description: >
+ *       Compares submitted answers against the lesson's aiQuizJson, calculates a percentage score,
+ *       and updates the authenticated user's readinessScore using a rolling average.
+ *       Requires authentication (mock login remains active; uses JWT auth).
+ *     tags: [Lessons]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: lessonId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *           format: int32
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [answers]
+ *             properties:
+ *               answers:
+ *                 description: >
+ *                   Answers can be either an array (0-based index per question) or an object map.
+ *                   Values must be integers 0..3.
+ *                 oneOf:
+ *                   - type: array
+ *                     items:
+ *                       type: integer
+ *                       minimum: 0
+ *                       maximum: 3
+ *                   - type: object
+ *                     additionalProperties:
+ *                       type: integer
+ *                       minimum: 0
+ *                       maximum: 3
+ *     responses:
+ *       200:
+ *         description: Quiz graded and readiness score updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 lessonId:
+ *                   type: integer
+ *                   format: int32
+ *                 correctCount:
+ *                   type: integer
+ *                 total:
+ *                   type: integer
+ *                 percentage:
+ *                   type: number
+ *                   format: float
+ *                 readinessScore:
+ *                   type: number
+ *                   format: float
+ *                 readinessScoreQuizCount:
+ *                   type: integer
+ *       400:
+ *         description: Invalid input or lesson has no quiz
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing or invalid token
+ *       404:
+ *         description: Lesson not found
+ *       503:
+ *         description: Database not available
+ */
+router.post('/:lessonId/submit-quiz', auth, async (req, res, next) => {
+  try {
+    const ds = getDataSource();
+    if (!ds || !ds.isInitialized) {
+      return res.status(503).json({ message: 'Database not available' });
+    }
+
+    const { lessonId } = req.params;
+    if (!isValidId(lessonId)) {
+      return res.status(400).json({ message: 'Invalid lessonId' });
+    }
+
+    const answers = req.body?.answers;
+    if (!answers || (typeof answers !== 'object' && !Array.isArray(answers))) {
+      return res.status(400).json({ message: 'answers is required and must be an array or object' });
+    }
+
+    const userId = Number(req.user?.id);
+    if (!Number.isFinite(userId) || userId <= 0) {
+      return res.status(401).json({ message: 'Invalid user context' });
+    }
+
+    const id = Number(lessonId);
+
+    const result = await ds.transaction(async (manager) => {
+      const lessonRepo = manager.getRepository('Lesson');
+      const userRepo = manager.getRepository('User');
+
+      const lesson = await lessonRepo.findOne({
+        where: { id, deletedAt: null },
+        select: { id: true, aiQuizJson: true },
+      });
+
+      if (!lesson) {
+        const err = new Error('Lesson not found');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const quiz = normalizeStoredQuiz(lesson.aiQuizJson);
+      if (!quiz || quiz.length === 0) {
+        const err = new Error('Lesson has no AI quiz available');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const { correctCount, total, percentage } = computeQuizScore(quiz, answers);
+
+      const user = await userRepo.findOne({
+        where: { id: userId },
+        select: { id: true, readinessScore: true, readinessScoreQuizCount: true },
+      });
+
+      if (!user) {
+        const err = new Error('User no longer exists');
+        err.statusCode = 401;
+        throw err;
+      }
+
+      const prevScore = Number(user.readinessScore || 0);
+      const prevCount = Number.isFinite(Number(user.readinessScoreQuizCount)) ? Number(user.readinessScoreQuizCount) : 0;
+
+      // Rolling average: newScore = (prevScore*prevCount + percentage) / (prevCount+1)
+      const nextCount = prevCount + 1;
+      const nextScore = Math.round(((prevScore * prevCount + percentage) / nextCount) * 100) / 100;
+
+      user.readinessScore = nextScore;
+      user.readinessScoreQuizCount = nextCount;
+      user.readinessScoreUpdatedAt = new Date();
+      await userRepo.save(user);
+
+      return {
+        lessonId: lesson.id,
+        correctCount,
+        total,
+        percentage,
+        readinessScore: Number(user.readinessScore),
+        readinessScoreQuizCount: Number(user.readinessScoreQuizCount),
+      };
+    });
+
+    return res.status(200).json(result);
+  } catch (err) {
     if (err && err.statusCode) {
       return res.status(err.statusCode).json({ message: err.message });
     }

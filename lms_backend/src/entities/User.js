@@ -32,6 +32,28 @@ const UserEntity = new EntitySchema({
       enum: ROLES,
       default: 'learner',
     },
+
+    /**
+     * Readiness score (0..100) updated when the learner submits quizzes.
+     * For now this is a simple rolling average across quiz submissions.
+     */
+    readinessScore: {
+      type: 'decimal',
+      precision: 5,
+      scale: 2,
+      nullable: false,
+      default: 0,
+    },
+    readinessScoreUpdatedAt: {
+      type: 'datetime',
+      nullable: true,
+    },
+    readinessScoreQuizCount: {
+      type: 'int',
+      nullable: false,
+      default: 0,
+    },
+
     createdAt: {
       type: 'datetime',
       createDate: true,
