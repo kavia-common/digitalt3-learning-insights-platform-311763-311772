@@ -13,7 +13,8 @@
     "db:migrate:revert": "node ./node_modules/typeorm/cli.js -d ./src/typeorm-datasource.js migration:revert",
     "db:migrate:show": "node ./node_modules/typeorm/cli.js -d ./src/typeorm-datasource.js migration:show",
     "db:seed": "node ./src/seeds/seed.js",
-    "db:init": "node ./src/scripts/db-init.js"
+    "db:init": "node ./src/scripts/db-init.js",
+    "final:wrapup": "node ./scripts/final-wrapup.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
